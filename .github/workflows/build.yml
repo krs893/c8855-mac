@@ -1,0 +1,29 @@
+name: Build and test macOS app
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Test USB bridge and reference implementation
+        run: python3 -m unittest discover -s . -p 'test_*.py'
+      - name: Test graph calculations
+        run: |
+          xcrun swiftc PlotData.swift PlotDataTests.swift -o /tmp/c8855-plot-tests
+          /tmp/c8855-plot-tests
+      - name: Build universal app
+        run: python3 build_app.py
+      - name: Verify and package
+        run: |
+          codesign --verify --deep --strict C8855カウンター.app
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent C8855カウンター.app dist/C8855-Mac-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: C8855-Mac-universal
+          path: dist/C8855-Mac-universal.zip
