@@ -3,9 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
-static int mode, started, writes;
+static int mode, started, writes, block_bytes = 4, reads;
 static unsigned char opcodes[64];
-void mock_reset(int value) { mode=value; started=0; writes=0; }
+void mock_reset(int value) { mode=value; started=0; writes=0; reads=0; }
 int mock_writes(void) { return writes; }
 int mock_opcode(int i) { return opcodes[i]; }
 int libusb_init(void **c) { *c=(void *)1; return 0; }
@@ -31,8 +31,9 @@ int libusb_bulk_transfer(void *h,unsigned char ep,unsigned char *p,int n,int *do
         if(p[0]==4) { if(n!=1)return -2; started=0; }
         else if(p[0]==7) { if(n!=1)return -2; }
         else if(p[0]==1) {
-            unsigned char expect[8]={1,p[1],1,0,4,0,0,0};
-            if(n!=8 || memcmp(p,expect,8) || p[1]<12 || p[1]>15) return -2;
+            block_bytes = p[1] == 9 ? 40 : p[1] == 10 ? 20 : p[1] == 11 ? 8 : 4;
+            unsigned char expect[8]={1,p[1],1,0,(unsigned char)block_bytes,0,0,0};
+            if(n!=8 || memcmp(p,expect,8) || p[1]<9 || p[1]>15) return -2;
         } else if(p[0]==3) {
             unsigned char expect[8]={3,0,0,0,0,0,0,0};
             if(n!=8 || memcmp(p,expect,8)) return -2;
@@ -42,9 +43,14 @@ int libusb_bulk_transfer(void *h,unsigned char ep,unsigned char *p,int n,int *do
     }
     if(ep!=0x81) return -2;
     if(n==64) { *done=0;return -7; }
-    if(n!=4 || !started) return -2;
+    if(n!=block_bytes || !started) return -2;
     if(mode==4) { *done=0;return -7; }
     unsigned char bytes[4]={0x78,0x56,0x34,0x92};
     if(mode==2)memset(bytes,0xff,4);
-    memcpy(p,bytes,4); *done=mode==1?2:4; return 0;
+    for (int i=0; i<n/4; ++i) {
+        memcpy(p+i*4,bytes,4);
+        if(mode==5) { uint32_t value=++reads; memcpy(p+i*4,&value,4); }
+        if(mode==6 && i==n/4-1) memset(p+i*4,0xff,4);
+    }
+    *done=mode==1?2:n; return 0;
 }

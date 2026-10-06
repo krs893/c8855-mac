@@ -19,6 +19,8 @@ struct C8855 {
     void *library, *context, *handle;
     int claimed, started;
     unsigned timeout;
+    unsigned block_count, buffered_count, buffered_index;
+    uint32_t buffered[10];
     char error[256];
     int (*init)(void **);
     void (*exit)(void *);
@@ -130,9 +132,11 @@ static int drain(C8855 *c) {
     return fail(c, "停止後のデータが残っています。USBを再接続してください。");
 }
 int c8855_start(C8855 *c, uint8_t gate, unsigned timeout) {
-    if (gate < 0x0c || gate > 0x0f) return fail(c, "対応していない計数時間です。");
+    if (gate < 0x09 || gate > 0x0f) return fail(c, "対応していない計数時間です。");
     uint8_t stop[] = {4}, reset[] = {7};
-    uint8_t setup[] = {1, gate, 1, 0, 4, 0, 0, 0};
+    c->block_count = gate == 0x09 ? 10 : gate == 0x0a ? 5 : gate == 0x0b ? 2 : 1;
+    c->buffered_count = c->buffered_index = 0;
+    uint8_t setup[] = {1, gate, 1, 0, (uint8_t)(4 * c->block_count), 0, 0, 0};
     uint8_t start[] = {3, 0, 0, 0, 0, 0, 0, 0};
     c->timeout = timeout;
     if (write_command(c, stop, 1) || drain(c) || write_command(c, reset, 1)
@@ -141,12 +145,23 @@ int c8855_start(C8855 *c, uint8_t gate, unsigned timeout) {
     return write_command(c, start, 8);
 }
 int c8855_read(C8855 *c, uint32_t *count) {
-    uint8_t data[4]; int transferred = 0;
-    if (check(c, c->bulk_transfer(c->handle, 0x81, data, 4, &transferred, c->timeout))) return -1;
-    if (transferred != 4) return fail(c, "受信データ長が不一致です。測定を中止しました。");
-    *count = (uint32_t)data[0] | ((uint32_t)data[1] << 8)
-           | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
-    if (*count == UINT32_MAX) return fail(c, "カウンターの転送エラーです。通常のカウントとして扱えません。");
+    if (c->buffered_index == c->buffered_count) {
+        uint8_t data[40]; int transferred = 0;
+        int bytes = (int)(4 * c->block_count);
+        if (!bytes) return fail(c, "測定が開始されていません。");
+        if (check(c, c->bulk_transfer(c->handle, 0x81, data, bytes, &transferred, c->timeout))) return -1;
+        if (transferred != bytes) return fail(c, "受信データ長が不一致です。測定を中止しました。");
+        // Validate the entire block before exposing any sample.
+        for (unsigned i = 0; i < c->block_count; ++i) {
+            uint8_t *p = data + i * 4;
+            c->buffered[i] = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+                          | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+            if (c->buffered[i] == UINT32_MAX)
+                return fail(c, "カウンターの転送エラーです。通常のカウントとして扱えません。");
+        }
+        c->buffered_count = c->block_count; c->buffered_index = 0;
+    }
+    *count = c->buffered[c->buffered_index++];
     return 0;
 }
 int c8855_stop(C8855 *c) {

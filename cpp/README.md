@@ -74,7 +74,7 @@ auto sample = c8855::Sample::from_event(event);
 ストリームを閉じるだけでは測定は止まりません。アプリのCSV保存は独立して続きます。
 画面とAPIは同じ測定を操作します。取得番号・セッションIDを確認してください。
 
-最短間隔は0.1秒です。C++に変えてもゲート時間やUSBの遅延は変わりません。
+最短計数時間は10 msです。10点を約100 msごとにまとめてUSB受信し、全点をCSVとAPIへ出力します。画面の更新は約100 msごとです。
 受信時刻は光子到着時刻・ゲート開始時刻ではなく、画面の切り替え時刻は実験コード側でも記録する必要があります。
 詳細は[API仕様](../API.md)を参照してください（配布ZIPではAPI.md）。
 
@@ -86,3 +86,5 @@ auto sample = c8855::Sample::from_event(event);
 クライアントはMIT。nlohmann/json v3.12.0はMITで、`vendor/nlohmann/LICENSE.MIT`を同梱します。
 libcurlはmacOSのシステムライブラリを動的に利用します。
 依存ライブラリの公式資料：[libcurl](https://curl.se/libcurl/)、[nlohmann/json](https://json.nlohmann.me/)。
+
+10 ms設定は `--gate 0.01` / `gate_seconds: 0.01` で指定できます。受信時刻は各ゲートの計測時刻ではなく、同一ブロックの点はほぼ同じ受信時刻になります。50 µs〜5 msの設定はこの版では未対応です。

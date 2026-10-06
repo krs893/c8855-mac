@@ -154,8 +154,21 @@ class APITests(unittest.TestCase):
         self.assertTrue(self.client.status()["running"])
         self.client.stop()
 
+    def test_cpp_fast_samples_match_csv(self):
+        run = subprocess.run([str(self.cpp), "--port", str(self.port), "--gate", "0.01", "--seconds", "1", "--json"],
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        samples = [json.loads(line) for line in run.stdout.splitlines() if line.startswith('{')]
+        self.assertEqual([row["sample"] for row in samples], list(range(1, 101)))
+        self.assertTrue(all(row["gate_seconds"] == 0.01 for row in samples))
+        self.assertTrue(all(row["counts_per_second"] == 0x92345678 / 0.01 for row in samples))
+        with open(self.client.status()["csv_file"], newline="") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual([int(row["sample"]) for row in rows], list(range(1, 101)))
+        self.assertEqual([int(row["counts"]) for row in rows], [row["counts"] for row in samples])
+
     def test_bad_settings_are_rejected_without_starting(self):
-        for payload in [{"gate_seconds": True}, {"gate_seconds": 0.01}, {"duration_seconds": 0},
+        for payload in [{"gate_seconds": True}, {"gate_seconds": 0.001}, {"duration_seconds": 0},
                         {"duration_seconds": True}, {"extra": 1}]:
             with self.assertRaises(CounterAPIError):
                 self.client._request("/start", payload)

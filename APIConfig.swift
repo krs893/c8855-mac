@@ -9,7 +9,7 @@ struct APIConfig {
         guard Set(json.keys).isSubset(of: ["gate_seconds", "duration_seconds"]) else { throw ConfigError.invalid }
         let gateValue = json["gate_seconds"] ?? 1.0
         guard let gate = gateValue as? NSNumber, CFGetTypeID(gate) != CFBooleanGetTypeID(),
-              [0.1, 0.2, 0.5, 1.0].contains(gate.doubleValue) else { throw ConfigError.invalid }
+              [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0].contains(gate.doubleValue) else { throw ConfigError.invalid }
         self.gate = String(format: "%g秒", gate.doubleValue)
         if let duration = json["duration_seconds"] {
             guard let number = duration as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),

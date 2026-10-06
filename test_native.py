@@ -68,6 +68,25 @@ class NativeBridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.c8855_stop(h), 0)
         self.assertEqual(self.mock.mock_opcode(self.mock.mock_writes()-1), 4)
 
+    def test_fast_blocks_preserve_order_across_transfers(self):
+        for gate in [9, 10, 11]:
+            h = self.open(5)
+            self.assertEqual(self.bridge.c8855_start(h, gate, 1200), 0)
+            values = []
+            for _ in range(23):
+                value = C.c_uint32()
+                self.assertEqual(self.bridge.c8855_read(h, C.byref(value)), 0)
+                values.append(value.value)
+            self.assertEqual(values, list(range(1, 24)))
+            self.assertEqual(self.bridge.c8855_stop(h), 0)
+
+    def test_fast_block_error_rejected_before_first_sample(self):
+        for mode in [1, 4, 6]:
+            h = self.open(mode)
+            self.assertEqual(self.bridge.c8855_start(h, 9, 1200), 0)
+            self.assertEqual(self.bridge.c8855_read(h, C.byref(C.c_uint32())), -1)
+            self.assertEqual(self.bridge.c8855_stop(h), 0)
+
     def test_invalid_gate_no_commands(self):
         h = self.open()
         self.assertEqual(self.bridge.c8855_start(h, 2, 3000), -1)

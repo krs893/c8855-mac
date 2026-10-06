@@ -12,7 +12,7 @@ def on_sample(sample):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--gate", type=float, choices=[0.1, 0.2, 0.5, 1.0], default=0.1)
+    parser.add_argument("--gate", type=float, choices=[0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0], default=0.1)
     parser.add_argument("--seconds", type=float, default=10)
     args = parser.parse_args()
     client = CounterClient()

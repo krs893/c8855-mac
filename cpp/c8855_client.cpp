@@ -98,7 +98,7 @@ Json Client::request(const std::string& path, const Json* body) const {
 Json Client::status() const { return request("/status"); }
 Json Client::probe() const { const Json body = Json::object(); return request("/probe", &body); }
 Json Client::start(double gate, std::optional<double> duration) const {
-    if (!(gate == 0.1 || gate == 0.2 || gate == 0.5 || gate == 1.0)) throw APIError("Invalid gate time");
+    if (!(gate == 0.01 || gate == 0.02 || gate == 0.05 || gate == 0.1 || gate == 0.2 || gate == 0.5 || gate == 1.0)) throw APIError("Invalid gate time");
     Json body = {{"gate_seconds", gate}};
     if (duration) {
         if (!std::isfinite(*duration) || *duration < 1 || *duration > 3600) throw APIError("Invalid duration");

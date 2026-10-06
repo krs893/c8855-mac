@@ -36,8 +36,8 @@ final class CounterModel: ObservableObject {
     private let lock = NSLock()
     private var stopRequested = false
     private var restartRequested = false
-    let gates: [String] = ["1秒", "0.5秒", "0.2秒", "0.1秒"]
-    private let settings: [String: (UInt8, Double)] = ["1秒": (15, 1), "0.5秒": (14, 0.5), "0.2秒": (13, 0.2), "0.1秒": (12, 0.1)]
+    let gates: [String] = ["1秒", "0.5秒", "0.2秒", "0.1秒", "0.05秒", "0.02秒", "0.01秒"]
+    private let settings: [String: (UInt8, Double)] = ["1秒": (15, 1), "0.5秒": (14, 0.5), "0.2秒": (13, 0.2), "0.1秒": (12, 0.1), "0.05秒": (11, 0.05), "0.02秒": (10, 0.02), "0.01秒": (9, 0.01)]
     private var library: String { suppliedLibrary ?? Bundle.main.resourceURL!.appendingPathComponent("libusb-1.0.dylib").path }
     var latest: Sample? { samples.last }
     var plotRows: [Sample] { PlotData.visible(freeze ? frozenSamples : samples, window: windowSeconds) }
@@ -76,7 +76,7 @@ final class CounterModel: ObservableObject {
         if method == "POST" && path == "/api/start" {
             guard !running && !checking else { return (409, ["error": "Counter is busy"]) }
             guard connected else { return (409, ["error": "Connect C8855-01 and probe first"]) }
-            guard let config = try? APIConfig(payload) else { return (400, ["error": "gate_seconds: 0.1/0.2/0.5/1; duration_seconds: optional 1..3600"]) }
+            guard let config = try? APIConfig(payload) else { return (400, ["error": "gate_seconds: 0.01/0.02/0.05/0.1/0.2/0.5/1; duration_seconds: optional 1..3600"]) }
             gate = config.gate; continuous = config.continuous; duration = config.duration
             start(); return (202, apiStatus())
         }
@@ -165,6 +165,21 @@ final class CounterModel: ObservableObject {
                     let clock = ISO8601DateFormatter(); clock.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
                     var i = 0
                     let limit = Int(ceil(duration / seconds))
+                    let batchSize = seconds < 0.1 ? Int((0.1 / seconds).rounded()) : 1
+                    var pending: [Sample] = []
+                    var csvBuffer = ""
+                    func publishPending() throws {
+                        guard !pending.isEmpty else { return }
+                        try file!.write(contentsOf: Data(csvBuffer.utf8))
+                        try file!.synchronize()
+                        let rows = pending
+                        pending.removeAll(keepingCapacity: true); csvBuffer = ""
+                        DispatchQueue.main.async {
+                            self.samples.append(contentsOf: rows); self.sampleCount = rows.last!.id
+                            if self.samples.count > 3000 { self.samples.removeFirst(self.samples.count - 3000) }
+                            for row in rows { self.api.broadcast(self.sampleEvent(row)) }
+                        }
+                    }
                     while continuous || i < limit {
                         if self.shouldStop() { break }
                         i += 1
@@ -175,14 +190,10 @@ final class CounterModel: ObservableObject {
                         let row = Sample(id: i, received: clock.string(from: received), seconds: seconds, counts: count,
                                          receivedUnixSeconds: received.timeIntervalSince1970, receivedMonotonicSeconds: monotonic)
                         let line = "\(row.received),\(i),\(seconds),\(count),\(row.cps),\(received.timeIntervalSince1970),\(monotonic),\(recordSession)\n"
-                        try file!.write(contentsOf: Data(line.utf8))
-                        try file!.synchronize()
-                        DispatchQueue.main.async {
-                            self.samples.append(row); self.sampleCount = row.id
-                            if self.samples.count > 3000 { self.samples.removeFirst(self.samples.count - 3000) }
-                            self.api.broadcast(self.sampleEvent(row))
-                        }
+                        csvBuffer += line; pending.append(row)
+                        if pending.count == batchSize { try publishPending() }
                     }
+                    try publishPending()
                 }
             } catch { failure = error.localizedDescription }
             if c8855_stop(counter) != 0 {
