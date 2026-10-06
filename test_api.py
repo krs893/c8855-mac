@@ -5,6 +5,7 @@ Never opens a physical USB device. The isolated test server writes to a temp fol
 import csv
 import json
 import pathlib
+import signal
 import socket
 import subprocess
 import tempfile
@@ -32,6 +33,11 @@ class APITests(unittest.TestCase):
                         "-import-objc-header", str(root / "USBBridge.h"), *[str(root / name) for name in sources],
                         str(cls.folder / "bridge.o"), "-o", str(cls.folder / "server"),
                         "-framework", "Cocoa", "-framework", "SwiftUI", "-framework", "Network"], check=True)
+        cls.cpp = cls.folder / "c8855_realtime"
+        subprocess.run(["xcrun", "clang++", "-std=c++17", "-O1", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+                        "-I" + str(root / "cpp/include"), "-I" + str(root / "cpp/vendor"),
+                        str(root / "cpp/c8855_client.cpp"), str(root / "cpp/example_realtime.cpp"),
+                        "-lcurl", "-pthread", "-o", str(cls.cpp)], check=True)
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             cls.port = probe.getsockname()[1]
@@ -100,6 +106,52 @@ class APITests(unittest.TestCase):
         state = self.client.status()
         self.assertTrue(state["running"])
         self.assertGreater(state["sample_count"], previous)
+        self.client.stop()
+
+    def test_cpp_live_stream_matches_csv(self):
+        run = subprocess.run([str(self.cpp), "--port", str(self.port), "--gate", "0.1", "--seconds", "1", "--json"],
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        samples = [json.loads(line) for line in run.stdout.splitlines()]
+        self.assertEqual([row["sample"] for row in samples], list(range(1, 11)))
+        self.assertTrue(all(row["counts"] == 0x92345678 for row in samples))
+        self.assertTrue(all(row["counts_per_second"] == 0x92345678 / 0.1 for row in samples))
+        state = self.client.status()
+        self.assertFalse(state["running"])
+        with open(state["csv_file"], newline="") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(rows[-1]["session_id"], samples[-1]["session_id"])
+        self.assertEqual(float(rows[-1]["received_unix_seconds"]), samples[-1]["received_unix_seconds"])
+
+    def test_cpp_ctrl_c_stops_continuous_measurement(self):
+        process = subprocess.Popen([str(self.cpp), "--port", str(self.port), "--continuous", "--json"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            first = json.loads(process.stdout.readline())
+            self.assertEqual(first["sample"], 1)
+            process.send_signal(signal.SIGINT)
+            remaining, error = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, error)
+            state = self.client.status()
+            self.assertFalse(state["running"])
+            samples = [first] + [json.loads(line) for line in remaining.splitlines()]
+            with open(state["csv_file"], newline="") as file:
+                rows = list(csv.DictReader(file))
+            self.assertEqual(len(samples), len(rows))
+            self.assertEqual(samples[-1]["sample"], int(rows[-1]["sample"]))
+        finally:
+            if process.poll() is None:
+                process.kill(); process.wait()
+            process.stdout.close(); process.stderr.close()
+
+    def test_cpp_busy_failure_does_not_stop_other_measurement(self):
+        self.client.start(0.1)
+        run = subprocess.run([str(self.cpp), "--port", str(self.port), "--seconds", "1"],
+                             capture_output=True, text=True, timeout=15)
+        self.assertEqual(run.returncode, 1)
+        self.assertIn("Counter is busy", run.stderr)
+        self.assertTrue(self.client.status()["running"])
         self.client.stop()
 
     def test_bad_settings_are_rejected_without_starting(self):

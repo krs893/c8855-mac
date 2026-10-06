@@ -12,6 +12,10 @@ jobs:
           python-version: '3.13'
       - name: Test USB bridge and reference implementation
         run: python3 -m unittest discover -s . -p 'test_*.py'
+      - name: Build C++ client
+        run: |
+          cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64'
+          cmake --build cpp/build --parallel 2
       - name: Test graph calculations
         run: |
           xcrun swiftc PlotData.swift PlotDataTests.swift -o /tmp/c8855-plot-tests
