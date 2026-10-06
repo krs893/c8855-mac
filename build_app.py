@@ -32,14 +32,15 @@ with tempfile.TemporaryDirectory(prefix="c8855-build-") as directory:
         subprocess.run(["xcrun", "swiftc", "-target", arch + "-apple-macosx13.0", "-sdk", sdk,
                         "-swift-version", "5", "-O", "-module-cache-path", str(temp / "swift-cache"),
                         "-import-objc-header", str(root / "USBBridge.h"), str(root / "NativeApp.swift"),
-                        str(root / "PlotData.swift"), str(obj), "-o", str(executable),
-                        "-framework", "Cocoa", "-framework", "SwiftUI"], check=True)
+                        str(root / "PlotData.swift"), str(root / "CounterModel.swift"),
+                        str(root / "LocalAPI.swift"), str(root / "APIConfig.swift"), str(obj), "-o", str(executable),
+                        "-framework", "Cocoa", "-framework", "SwiftUI", "-framework", "Network"], check=True)
         executables.append(str(executable))
     subprocess.run(["lipo", "-create", *executables, "-output", str(macos / "C8855Counter")], check=True)
 with (bundle / "Contents" / "Info.plist").open("wb") as f:
     plistlib.dump(dict(CFBundleExecutable="C8855Counter", CFBundleIdentifier="local.lab.c8855",
                       CFBundleName="C8855カウンター", CFBundleDisplayName="C8855カウンター",
-                      CFBundlePackageType="APPL", CFBundleVersion="3", CFBundleShortVersionString="0.3.0",
+                      CFBundlePackageType="APPL", CFBundleVersion="4", CFBundleShortVersionString="0.4.0",
                       LSMinimumSystemVersion="13.0", NSHighResolutionCapable=True), f)
 subprocess.run(["codesign", "--force", "--sign", "-", str(resources / "libusb-1.0.dylib")], check=True)
 subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)], check=True)

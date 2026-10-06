@@ -5,6 +5,8 @@ struct Sample: Identifiable {
     let received: String
     let seconds: Double
     let counts: UInt32
+    var receivedUnixSeconds: Double? = nil
+    var receivedMonotonicSeconds: Double? = nil
     var cps: Double { Double(counts) / seconds }
     var elapsed: Double { Double(id) * seconds }
     func value(rate: Bool) -> Double { rate ? cps : Double(counts) }

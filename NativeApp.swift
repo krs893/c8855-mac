@@ -2,164 +2,6 @@ import Cocoa
 import SwiftUI
 import UniformTypeIdentifiers
 
-final class CounterModel: ObservableObject {
-    @Published var showHelp = false
-    @Published var gate = "1秒"
-    @Published var connected = false
-    @Published var connectionDetail = "USBでカウンターを接続してください"
-    @Published var duration = "10"
-    @Published var continuous = true
-    @Published var windowSeconds = 30.0
-    @Published var rateDisplay = true
-    @Published var automaticScale = true
-    @Published var manualMaximum = "1000"
-    @Published var freeze = false
-    @Published var frozenSamples: [Sample] = []
-    @Published var sampleCount = 0
-    @Published var activeGate = ""
-    @Published var running = false
-    @Published var checking = false
-    @Published var status = "カウンターをUSBで接続し、「接続を確認」を押してください。"
-    @Published var error = ""
-    @Published var samples: [Sample] = []
-    @Published var savedURL: URL?
-    private let queue = DispatchQueue(label: "lab.c8855.usb")
-    private let lock = NSLock()
-    private var stopRequested = false
-    private var restartRequested = false
-    let gates: [String] = ["1秒", "0.5秒", "0.2秒", "0.1秒"]
-    private let settings: [String: (UInt8, Double)] = ["1秒": (15, 1), "0.5秒": (14, 0.5), "0.2秒": (13, 0.2), "0.1秒": (12, 0.1)]
-    private var library: String { Bundle.main.resourceURL!.appendingPathComponent("libusb-1.0.dylib").path }
-    var latest: Sample? { samples.last }
-    var plotRows: [Sample] { PlotData.visible(freeze ? frozenSamples : samples, window: windowSeconds) }
-    func freezeChanged() { frozenSamples = freeze ? samples : [] }
-    func applyGate() {
-        guard running else { return }
-        restartRequested = true
-        lock.lock(); stopRequested = true; lock.unlock()
-        status = "記録を保存し、計数時間を変更しています…"
-    }
-
-    func probe() {
-        guard !running && !checking else { return }
-        checking = true; error = ""
-        let path = library
-        queue.async {
-            var buffer = [CChar](repeating: 0, count: 512)
-            let found = c8855_probe(path, &buffer, buffer.count)
-            let message = String(cString: buffer)
-            DispatchQueue.main.async {
-                self.checking = false
-                self.connected = found == 1
-                self.connectionDetail = found == 1 ? "C8855-01 · USB接続済み" : (found == 0 ? "カウンターが見つかりません。USB接続を確認してください。" : "1台だけ接続してください。")
-                if found < 0 { self.error = message; self.status = "接続を確認できませんでした。" }
-                else if found == 1 { self.status = "C8855-01を検出しました。測定を開始できます。" }
-                else { self.status = "C8855-01検出数：\(found)。1台だけ接続してください。" }
-            }
-        }
-    }
-
-    func stop() {
-        restartRequested = false
-        lock.lock(); stopRequested = true; lock.unlock()
-        if running { status = "停止しています…" }
-    }
-    private func shouldStop() -> Bool {
-        lock.lock(); defer { lock.unlock() }; return stopRequested
-    }
-    func start() {
-        guard !running && !checking, let (code, seconds) = settings[gate] else { return }
-        let continuous = continuous
-        let duration = continuous ? 10.0 : (Double(duration) ?? .nan)
-        guard duration.isFinite, duration >= 1, duration <= 3600 else {
-            error = "測定時間は1〜3600秒で入力してください。"; return
-        }
-        running = true; restartRequested = false; samples = []; sampleCount = 0
-        freeze = false; frozenSamples = []; activeGate = gate
-        savedURL = nil; error = ""; status = "測定準備中…"
-        lock.lock(); stopRequested = false; lock.unlock()
-        let path = library
-        let dataFolder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("C8855Counter/measurements")
-        queue.async {
-            var buffer = [CChar](repeating: 0, count: 512)
-            guard let counter = c8855_open(path, &buffer, buffer.count) else {
-                let message = String(cString: buffer)
-                DispatchQueue.main.async { self.connected = false; self.connectionDetail = "USB接続を確認してください。"; self.error = message; self.status = "測定を開始できません。"; self.running = false; self.restartRequested = false }
-                return
-            }
-            var failure = ""
-            var file: FileHandle?
-            do {
-                try FileManager.default.createDirectory(at: dataFolder, withIntermediateDirectories: true)
-                let formatter = DateFormatter(); formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
-                let url = dataFolder.appendingPathComponent(formatter.string(from: Date()) + "_" + UUID().uuidString.prefix(6) + ".csv")
-                guard FileManager.default.createFile(atPath: url.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
-                file = try FileHandle(forWritingTo: url)
-                try file!.write(contentsOf: Data("received_at,sample,gate_seconds,counts,counts_per_second\n".utf8))
-                DispatchQueue.main.async { self.savedURL = url }
-                if c8855_start(counter, code, UInt32(seconds * 2000 + 1000)) != 0 {
-                    failure = String(cString: c8855_error(counter))
-                } else {
-                    DispatchQueue.main.async { self.status = "測定中" }
-                    let clock = ISO8601DateFormatter(); clock.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                    var i = 0
-                    let limit = Int(ceil(duration / seconds))
-                    while continuous || i < limit {
-                        if self.shouldStop() { break }
-                        i += 1
-                        var count: UInt32 = 0
-                        if c8855_read(counter, &count) != 0 { failure = String(cString: c8855_error(counter)); break }
-                        let row = Sample(id: i, received: clock.string(from: Date()), seconds: seconds, counts: count)
-                        let line = "\(row.received),\(i),\(seconds),\(count),\(row.cps)\n"
-                        try file!.write(contentsOf: Data(line.utf8))
-                        try file!.synchronize()
-                        DispatchQueue.main.async {
-                            self.samples.append(row); self.sampleCount = row.id
-                            if self.samples.count > 3000 { self.samples.removeFirst(self.samples.count - 3000) }
-                        }
-                    }
-                }
-            } catch { failure = error.localizedDescription }
-            if c8855_stop(counter) != 0 {
-                failure += (failure.isEmpty ? "" : " / ") + "停止確認に失敗：" + String(cString: c8855_error(counter))
-            }
-            c8855_close(counter)
-            try? file?.close()
-            let finalFailure = failure
-            DispatchQueue.main.async {
-                self.error = finalFailure
-                self.status = finalFailure.isEmpty ? "測定終了" : "測定を中止しました"
-                self.running = false
-                if finalFailure.isEmpty && self.restartRequested { self.start() }
-                else { self.restartRequested = false }
-            }
-        }
-    }
-
-    func openDataFolder() {
-        let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("C8855Counter/measurements")
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            NSWorkspace.shared.open(folder)
-        } catch { self.error = error.localizedDescription }
-    }
-
-    func export() {
-        guard !running, let url = savedURL else { return }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.commaSeparatedText]
-        panel.nameFieldStringValue = url.lastPathComponent
-        if panel.runModal() == .OK, let destination = panel.url {
-            do {
-                let data = try Data(contentsOf: url)
-                try data.write(to: destination, options: .atomic)
-            } catch { self.error = error.localizedDescription }
-        }
-    }
-}
-
 struct CounterView: View {
     @ObservedObject var model: CounterModel
     private var unit: String { model.rateDisplay ? "counts/s" : "counts" }
@@ -306,6 +148,11 @@ struct CounterView: View {
                         .font(.caption2).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
                 }
             }
+            Divider().padding(.vertical, 22)
+            Text("外部コード連携").font(.callout).bold().padding(.bottom, 8)
+            Text(model.apiReady ? "API受付中 · 127.0.0.1:8855" : (model.apiDetail == "準備中" ? "API準備中" : "APIを利用できません"))
+                .font(.caption).foregroundColor(model.apiReady ? .secondary : .orange)
+            if !model.apiReady { Text(model.apiDetail).font(.caption2).foregroundColor(.secondary) }
             Spacer(minLength: 16)
         }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
         }.background(Color(nsColor: .controlBackgroundColor))
@@ -321,7 +168,9 @@ struct CounterView: View {
             Text("計数時間を変更したら「変更して再開」を押します。表示の固定は測定を止めません。「停止」で計数を終了します。")
             Text("CSVは自動保存します。「保存フォルダー」で確認し、停止後に「CSVを書き出す…」でコピーできます。")
             Divider()
-            Text("メーカー非公式 · v0.3.0").font(.caption).foregroundColor(.secondary)
+            Text("外部コード連携：このアプリを起動したまま、同じMac上のPythonコードなどからAPIで開始・停止・カウントの連続受信ができます。接続先は127.0.0.1:8855です。")
+                .font(.caption)
+            Text("メーカー非公式 · v0.4.0").font(.caption).foregroundColor(.secondary)
             Text("USB認識・1秒ゲートの0カウント取得・停止は確認済み。非ゼロの精度、短いゲート、長時間測定、Intel実機は未検証です。")
                 .font(.caption).foregroundColor(.secondary)
             HStack { Spacer(); Button("閉じる") { model.showHelp = false }.keyboardShortcut(.defaultAction) }
@@ -389,6 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = CounterModel()
     private var window: NSWindow?
     func applicationDidFinishLaunching(_ notification: Notification) {
+        model.startAPI()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 740),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "C8855-01 カウンター"
@@ -400,6 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = appMenu; menu.addItem(item); NSApp.mainMenu = menu
     }
+    func applicationWillTerminate(_ notification: Notification) { model.api.stop() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard model.running || model.checking else { return .terminateNow }

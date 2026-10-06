@@ -43,9 +43,20 @@ SPAD未接続では光子の測定はできません。実機テスト時の0カ
 
 CSVは `~/Library/Application Support/C8855Counter/measurements/` に自動保存します。
 「保存フォルダー」でFinderに表示し、測定終了後に「CSVを書き出す…」で別の場所へコピーできます。
-列は受信時刻、取得番号、計数時間、カウント、counts/sです。
+列は受信時刻、取得番号、計数時間、カウント、counts/s、Unix受信秒、単調時計の受信秒、セッションIDです。
 counts/sはカウント÷設定時間で、検出効率・デッドタイムの補正はありません。
 連続測定では保存容量に注意してください。
+
+## 外部コードからのリアルタイム計測
+
+アプリを起動したまま、Pythonなどから開始・停止・連続受信ができます。
+左側の「API受付中」を確認してください。[APIの使い方とPython例](API.md)。
+
+```sh
+python3 example_realtime.py --gate 0.1 --seconds 10
+```
+
+最短0.1秒ごとのカウントを送信します。受信時刻はゲート開始時刻ではなく、画面表示との厳密な同期は未実装です。
 
 ## 検証状況
 
@@ -66,7 +77,10 @@ xcrun swiftc PlotData.swift PlotDataTests.swift -o /tmp/c8855-plot-tests
 /tmp/c8855-plot-tests
 ```
 
-- `NativeApp.swift`：画面、連続取得、CSV保存。
+- `NativeApp.swift`：画面。
+- `CounterModel.swift`：連続取得・CSV保存・外部操作。
+- `LocalAPI.swift` / `APIConfig.swift`：ローカルAPIと設定の検証。
+- `counter_client.py` / `example_realtime.py`：Pythonからのリアルタイム受信。
 - `PlotData.swift`：表示範囲・縦軸の計算。
 - `USBBridge.c` / `.h`：USB通信。模擬libusbを使うテストは実機を操作しません。
 - `counter.py` / `reference_session.py`：通信確認用のPython参照実装。アプリ実行時は使いません。
