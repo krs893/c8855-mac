@@ -3,7 +3,10 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 final class CounterModel: ObservableObject {
-    @Published var gate = "0.1秒"
+    @Published var showHelp = false
+    @Published var gate = "1秒"
+    @Published var connected = false
+    @Published var connectionDetail = "USBでカウンターを接続してください"
     @Published var duration = "10"
     @Published var continuous = true
     @Published var windowSeconds = 30.0
@@ -47,6 +50,8 @@ final class CounterModel: ObservableObject {
             let message = String(cString: buffer)
             DispatchQueue.main.async {
                 self.checking = false
+                self.connected = found == 1
+                self.connectionDetail = found == 1 ? "C8855-01 · USB接続済み" : (found == 0 ? "カウンターが見つかりません。USB接続を確認してください。" : "1台だけ接続してください。")
                 if found < 0 { self.error = message; self.status = "接続を確認できませんでした。" }
                 else if found == 1 { self.status = "C8855-01を検出しました。測定を開始できます。" }
                 else { self.status = "C8855-01検出数：\(found)。1台だけ接続してください。" }
@@ -65,7 +70,8 @@ final class CounterModel: ObservableObject {
     func start() {
         guard !running && !checking, let (code, seconds) = settings[gate] else { return }
         let continuous = continuous
-        guard let duration = Double(duration), duration.isFinite, duration >= 1, duration <= 3600 else {
+        let duration = continuous ? 10.0 : (Double(duration) ?? .nan)
+        guard duration.isFinite, duration >= 1, duration <= 3600 else {
             error = "測定時間は1〜3600秒で入力してください。"; return
         }
         running = true; restartRequested = false; samples = []; sampleCount = 0
@@ -79,7 +85,7 @@ final class CounterModel: ObservableObject {
             var buffer = [CChar](repeating: 0, count: 512)
             guard let counter = c8855_open(path, &buffer, buffer.count) else {
                 let message = String(cString: buffer)
-                DispatchQueue.main.async { self.error = message; self.status = "測定を開始できません。"; self.running = false; self.restartRequested = false }
+                DispatchQueue.main.async { self.connected = false; self.connectionDetail = "USB接続を確認してください。"; self.error = message; self.status = "測定を開始できません。"; self.running = false; self.restartRequested = false }
                 return
             }
             var failure = ""
@@ -131,6 +137,15 @@ final class CounterModel: ObservableObject {
         }
     }
 
+    func openDataFolder() {
+        let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("C8855Counter/measurements")
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(folder)
+        } catch { self.error = error.localizedDescription }
+    }
+
     func export() {
         guard !running, let url = savedURL else { return }
         let panel = NSSavePanel()
@@ -147,106 +162,226 @@ final class CounterModel: ObservableObject {
 
 struct CounterView: View {
     @ObservedObject var model: CounterModel
+    private var unit: String { model.rateDisplay ? "counts/s" : "counts" }
+    private var manualValid: Bool {
+        guard let value = Double(model.manualMaximum) else { return false }
+        return value.isFinite && value > 0
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                Image(systemName: "waveform.path").font(.largeTitle).foregroundColor(.accentColor)
-                VStack(alignment: .leading) {
-                    Text("C8855-01 カウンター").font(.title2).bold()
-                    Text("Mac用試作版 · USB通信確認済み、カウント精度は検証前").font(.caption).foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-            HStack(alignment: .bottom, spacing: 12) {
-                Button("接続を確認", action: model.probe).disabled(model.running || model.checking)
-                VStack(alignment: .leading) {
-                    Text("1回の計数時間").font(.caption)
-                    Picker("1回の計数時間", selection: $model.gate) {
-                        ForEach(model.gates, id: \.self) { Text($0) }
-                    }.labelsHidden().frame(width: 110)
-                }.disabled(model.checking)
-                if model.running {
-                    Button("計数時間を適用", action: model.applyGate).disabled(model.gate == model.activeGate)
-                }
-                Button("測定開始", action: model.start).buttonStyle(.borderedProminent).disabled(model.running || model.checking)
-                Button("停止", action: model.stop).disabled(!model.running)
-            }
+        VStack(spacing: 0) {
             HStack(spacing: 16) {
-                Toggle("連続測定（停止するまで）", isOn: $model.continuous).disabled(model.running).toggleStyle(.checkbox)
-                if !model.continuous {
-                    Text("測定時間")
-                    TextField("秒数", text: $model.duration).textFieldStyle(.roundedBorder).frame(width: 70).disabled(model.running)
-                    Text("秒")
-                }
+                Text("C8855-01").font(.system(size: 20, weight: .semibold))
+                Divider().frame(height: 22)
+                Circle().fill(model.running ? Color.green : (model.connected ? Color.green : Color.secondary)).frame(width: 7, height: 7)
+                Text(model.checking ? "接続を確認中…" : (model.running ? "測定中" : (model.connected ? "USB接続済み" : "未接続")))
+                    .font(.callout).foregroundColor(.secondary)
                 Spacer()
-                if model.running { Text("計数時間：\(model.activeGate)").font(.caption).foregroundColor(.secondary) }
-            }
-            Text(model.status).font(.callout)
-            if !model.error.isEmpty { Text(model.error).foregroundColor(.red).font(.callout).textSelection(.enabled) }
+                Button { model.showHelp = true } label: { Image(systemName: "questionmark.circle").font(.title3) }
+                    .buttonStyle(.plain).help("接続と操作の説明").accessibilityLabel("使い方")
+                Button(action: model.start) { Label("測定開始", systemImage: "play.fill").frame(width: 96) }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+                    .disabled(model.running || model.checking || !model.connected)
+                Button(action: model.stop) { Label("停止", systemImage: "stop.fill").frame(width: 64) }
+                    .controlSize(.large).disabled(!model.running).keyboardShortcut(".", modifiers: .command)
+            }.padding(.horizontal, 24).padding(.vertical, 16)
             Divider()
-            HStack(alignment: .firstTextBaseline) {
-                Text(model.latest.map { String(format: model.rateDisplay ? "%.1f" : "%.0f", $0.value(rate: model.rateDisplay)) } ?? "—").font(.system(size: 48, weight: .semibold, design: .rounded)).monospacedDigit()
-                Text(model.rateDisplay ? "counts / second" : "counts / gate").foregroundColor(.secondary)
-                Spacer()
-            }
-            Text(model.latest.map { "\(String(format: "%g", $0.seconds))秒間に \($0.counts) カウント · \(model.sampleCount)回取得" } ?? "まだ測定していません。")
-                .font(.callout).foregroundColor(.secondary)
-            HStack(spacing: 16) {
-                Picker("横軸", selection: $model.windowSeconds) {
-                    Text("直近10秒").tag(10.0); Text("直近30秒").tag(30.0); Text("直近60秒").tag(60.0)
-                }.frame(width: 160)
-                Picker("縦軸", selection: $model.rateDisplay) {
-                    Text("毎秒のカウント").tag(true); Text("1回のカウント").tag(false)
-                }.frame(width: 190)
-                Toggle("自動範囲", isOn: $model.automaticScale).toggleStyle(.checkbox)
-                if !model.automaticScale {
-                    TextField("縦軸の上限", text: $model.manualMaximum).textFieldStyle(.roundedBorder).frame(width: 90)
-                }
-                Spacer()
-                Toggle("グラフを止める", isOn: $model.freeze).toggleStyle(.checkbox).onChange(of: model.freeze) { _ in model.freezeChanged() }
-            }.font(.callout)
-            GeometryReader { geo in
-                let rows = model.plotRows
-                let maxValue = PlotData.maximum(rows, rate: model.rateDisplay, automatic: model.automaticScale, manual: model.manualMaximum)
-                let end = rows.last?.elapsed ?? 0
-                let start = max(0, end - model.windowSeconds)
-                let span = max(model.windowSeconds, end - start)
-                ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor))
-                    Path { p in
-                        for i in 0...5 {
-                            let x = 50 + Double(i) / 5 * (geo.size.width - 70)
-                            p.move(to: CGPoint(x: x, y: 28)); p.addLine(to: CGPoint(x: x, y: geo.size.height - 32))
-                            let y = 28 + Double(i) / 5 * (geo.size.height - 60)
-                            p.move(to: CGPoint(x: 50, y: y)); p.addLine(to: CGPoint(x: geo.size.width - 20, y: y))
+            HStack(spacing: 0) {
+                sidebar.frame(width: 242)
+                Divider()
+                VStack(alignment: .leading, spacing: 16) {
+                    if !model.error.isEmpty {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(model.status).font(.callout).bold()
+                                Text(model.error).font(.caption).textSelection(.enabled)
+                            }
+                            Spacer()
+                        }.padding(12).background(Color.orange.opacity(0.09)).cornerRadius(6)
+                    }
+                    HStack(alignment: .bottom) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.rateDisplay ? "毎秒のカウント" : "1回のカウント").font(.callout).foregroundColor(.secondary)
+                            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                Text(model.latest.map { String(format: model.rateDisplay ? "%.1f" : "%.0f", $0.value(rate: model.rateDisplay)) } ?? "—")
+                                    .font(.system(size: 54, weight: .medium, design: .monospaced)).monospacedDigit()
+                                Text(unit).font(.callout).foregroundColor(.secondary)
+                            }
                         }
-                    }.stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-                    Path { p in
-                        for (i, row) in rows.enumerated() {
-                            let x = 50 + (row.elapsed - start) / span * (geo.size.width - 70)
-                            let y = geo.size.height - 32 - PlotData.normalized(row.value(rate: model.rateDisplay), maximum: maxValue) * (geo.size.height - 60)
-                            if i == 0 { p.move(to: CGPoint(x: x, y: y)) } else { p.addLine(to: CGPoint(x: x, y: y)) }
-                        }
-                    }.stroke(Color.accentColor, lineWidth: 2)
-                    VStack(alignment: .leading) {
-                        Text("\(String(format: "%g", maxValue)) \(model.rateDisplay ? "cps" : "counts")")
                         Spacer()
-                        HStack { Text("\(String(format: "%g", start)) s"); Spacer(); Text("\(String(format: "%g", start + span)) s") }
-                    }.font(.caption).foregroundColor(.secondary).padding(10)
-                }
-            }.frame(minHeight: 120)
-            HStack {
-                Button("CSVを書き出す…", action: model.export).disabled(model.running || model.samples.isEmpty)
-                if let url = model.savedURL {
-                    Button("保存先を開く") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                        VStack(alignment: .trailing, spacing: 7) {
+                            Text(model.running ? model.status : (model.samples.isEmpty ? "測定待ち" : model.status))
+                                .font(.callout).foregroundColor(model.running ? .green : .secondary)
+                            Text(model.latest.map { "\(String(format: "%g", $0.seconds))秒間に \($0.counts) カウント" } ?? "出力パルスを数えて表示します")
+                                .font(.caption).foregroundColor(.secondary)
+                            Text("\(model.sampleCount)回取得").font(.caption).monospacedDigit().foregroundColor(.secondary)
+                        }
+                    }
+                    HStack {
+                        Text("カウントの推移").font(.callout).bold()
+                        Spacer()
+                        Button {
+                            model.freeze.toggle(); model.freezeChanged()
+                        } label: {
+                            Label(model.freeze ? "表示を再開" : "表示を固定", systemImage: model.freeze ? "play.fill" : "pause.fill")
+                        }.disabled(model.samples.isEmpty).help("グラフだけを固定します。測定と保存は続きます。")
+                    }
+                    CountPlot(rows: model.plotRows, window: model.windowSeconds,
+                              maximum: PlotData.maximum(model.plotRows, rate: model.rateDisplay, automatic: model.automaticScale, manual: model.manualMaximum),
+                              rate: model.rateDisplay, emptyMessage: model.connected ? "「測定開始」でグラフを表示" : "カウンターをUSBで接続してください")
+                        .frame(minHeight: 220)
+                    HStack(spacing: 6) {
+                        if model.freeze { Image(systemName: "pause.fill").foregroundColor(.orange) }
+                        Text(model.freeze ? (model.running ? "表示固定中 · 測定とCSV保存は継続" : "表示固定中 · 測定は終了") : "横軸：計数時間の累積 · 個々のパルス波形ではありません")
+                            .font(.caption).foregroundColor(.secondary)
+                        Spacer()
+                    }
+                }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Divider()
+            HStack(spacing: 12) {
+                Image(systemName: "doc.text").foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.savedURL == nil ? "測定データはCSVに自動保存" : (model.running ? "CSVに記録中" : "CSVを保存しました"))
+                        .font(.callout)
+                    Text(model.savedURL?.lastPathComponent ?? "測定を開始すると記録を作成します")
+                        .font(.caption).foregroundColor(.secondary).lineLimit(1)
                 }
                 Spacer()
+                Button("保存フォルダー", action: model.openDataFolder)
+                Button("CSVを書き出す…", action: model.export).disabled(model.running || model.samples.isEmpty)
+            }.padding(.horizontal, 24).padding(.vertical, 14)
+        }.frame(minWidth: 980, minHeight: 650)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .onAppear { model.probe() }
+            .sheet(isPresented: $model.showHelp) { helpSheet }
+    }
+
+    private var sidebar: some View {
+        ScrollView {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("カウンター").font(.callout).bold().padding(.bottom, 12)
+            Text(model.connectionDetail).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 12)
+            Button("接続を確認", action: model.probe).disabled(model.running || model.checking)
+            Divider().padding(.vertical, 22)
+            Text("測定設定").font(.callout).bold().padding(.bottom, 16)
+            Text("1回の計数時間").font(.caption).foregroundColor(.secondary)
+            Picker("1回の計数時間", selection: $model.gate) {
+                ForEach(model.gates, id: \.self) { Text($0) }
+            }.labelsHidden().padding(.top, 6).disabled(model.checking)
+            if model.running && model.gate != model.activeGate {
+                Button("変更して再開", action: model.applyGate).padding(.top, 8)
+                Text("現在の記録を保存して再開します").font(.caption2).foregroundColor(.secondary).padding(.top, 4)
             }
-            Text(model.freeze ? "グラフの表示だけ停止しています。計数とCSV記録は続きます。" : "横軸は計数時間の累積です。計数時間の変更時は記録を分けて再開します。")
+            Text("測定の終了").font(.caption).foregroundColor(.secondary).padding(.top, 18)
+            Picker("測定の終了", selection: $model.continuous) {
+                Text("手動で停止").tag(true); Text("時間を指定").tag(false)
+            }.labelsHidden().padding(.top, 6).disabled(model.running)
+            if !model.continuous {
+                HStack {
+                    TextField("測定時間", text: $model.duration).textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("測定時間（秒）")
+                    Text("秒").font(.callout).foregroundColor(.secondary)
+                }.padding(.top, 8).disabled(model.running)
+            }
+            Divider().padding(.vertical, 22)
+            Text("グラフ設定").font(.callout).bold().padding(.bottom, 16)
+            Text("表示する時間").font(.caption).foregroundColor(.secondary)
+            Picker("表示する時間", selection: $model.windowSeconds) {
+                Text("直近10秒").tag(10.0); Text("直近30秒").tag(30.0); Text("直近60秒").tag(60.0)
+            }.labelsHidden().padding(.top, 6)
+            Text("表示する値").font(.caption).foregroundColor(.secondary).padding(.top, 16)
+            Picker("表示する値", selection: $model.rateDisplay) {
+                Text("毎秒のカウント").tag(true); Text("1回のカウント").tag(false)
+            }.labelsHidden().padding(.top, 6)
+            Toggle("縦軸の上限を自動調整", isOn: $model.automaticScale).toggleStyle(.checkbox).font(.caption).padding(.top, 16)
+            if !model.automaticScale {
+                HStack {
+                    TextField("上限", text: $model.manualMaximum).textFieldStyle(.roundedBorder).accessibilityLabel("縦軸の上限")
+                    Text(unit).font(.caption).foregroundColor(.secondary)
+                }.padding(.top, 8)
+                if !manualValid {
+                    Text("0より大きい数を入力してください。現在は自動調整です。")
+                        .font(.caption2).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+                }
+            }
+            Spacer(minLength: 16)
+        }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+        }.background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var helpSheet: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("接続と測定").font(.title2).bold()
+            Text("1. C8855-01をUSBでMacに接続\n2. SPADのSIGNALをカウンターのSIG INへ接続\n3. 接続を確認し、「測定開始」を押す")
+                .font(.body).lineSpacing(8)
+            Divider()
+            Text("SPADの電源は別途±5 Vが必要です。カウンターのDC OUTをSPAD電源に接続しないでください。")
+            Text("計数時間を変更したら「変更して再開」を押します。表示の固定は測定を止めません。「停止」で計数を終了します。")
+            Text("CSVは自動保存します。「保存フォルダー」で確認し、停止後に「CSVを書き出す…」でコピーできます。")
+            Divider()
+            Text("メーカー非公式 · v0.3.0").font(.caption).foregroundColor(.secondary)
+            Text("USB認識・1秒ゲートの0カウント取得・停止は確認済み。非ゼロの精度、短いゲート、長時間測定、Intel実機は未検証です。")
                 .font(.caption).foregroundColor(.secondary)
-            Text("SPADの±5 V電源は別途必要です。カウンターのDC OUTはSPADに使わないでください。")
-                .font(.caption).foregroundColor(.secondary)
-        }.padding(28).frame(minWidth: 900, minHeight: 640)
+            HStack { Spacer(); Button("閉じる") { model.showHelp = false }.keyboardShortcut(.defaultAction) }
+        }.padding(28).frame(width: 510)
+    }
+}
+
+struct CountPlot: View {
+    let rows: [Sample]
+    let window: Double
+    let maximum: Double
+    let rate: Bool
+    let emptyMessage: String
+    private let trace = Color(red: 0.23, green: 0.86, blue: 0.69)
+    var body: some View {
+        GeometryReader { geo in
+            let end = rows.last?.elapsed ?? 0
+            let start = max(0, end - window)
+            let left = 66.0, top = 26.0
+            let width = max(1, geo.size.width - left - 24)
+            let height = max(1, geo.size.height - top - 42)
+            ZStack(alignment: .topLeading) {
+                Color(red: 0.07, green: 0.09, blue: 0.10)
+                Path { p in
+                    for i in 0...5 {
+                        let x = left + Double(i) / 5 * width
+                        p.move(to: CGPoint(x: x, y: top)); p.addLine(to: CGPoint(x: x, y: top + height))
+                        let y = top + Double(i) / 5 * height
+                        p.move(to: CGPoint(x: left, y: y)); p.addLine(to: CGPoint(x: left + width, y: y))
+                    }
+                }.stroke(Color.white.opacity(0.13), lineWidth: 0.5)
+                ForEach(0...5, id: \.self) { i in
+                    Text(String(format: "%.3g", maximum * (1 - Double(i) / 5)))
+                        .frame(width: 52, alignment: .trailing)
+                        .position(x: 30, y: top + Double(i) / 5 * height)
+                    Text(String(format: "%g", start + Double(i) / 5 * window))
+                        .position(x: left + Double(i) / 5 * width, y: top + height + 18)
+                }.font(.system(size: 10, design: .monospaced)).foregroundColor(.white.opacity(0.5))
+                Text(rate ? "counts/s" : "counts").font(.system(size: 10)).foregroundColor(.white.opacity(0.5)).padding(.leading, 12).padding(.top, 7)
+                Text("時間 (秒)").font(.system(size: 10)).foregroundColor(.white.opacity(0.5)).position(x: left + width - 24, y: 12)
+                Path { p in
+                    for (i, row) in rows.enumerated() {
+                        let point = CGPoint(x: left + (row.elapsed - start) / window * width,
+                                            y: top + height * (1 - PlotData.normalized(row.value(rate: rate), maximum: maximum)))
+                        if i == 0 { p.move(to: point) } else { p.addLine(to: point) }
+                    }
+                }.stroke(trace, lineWidth: 1.7)
+                if let last = rows.last {
+                    Circle().fill(trace).frame(width: 5, height: 5)
+                        .position(x: left + (last.elapsed - start) / window * width,
+                                  y: top + height * (1 - PlotData.normalized(last.value(rate: rate), maximum: maximum)))
+                }
+                if rows.isEmpty {
+                    Text(emptyMessage).font(.callout).foregroundColor(.white.opacity(0.65))
+                        .frame(width: width, height: height).offset(x: left, y: top)
+                }
+            }.clipShape(RoundedRectangle(cornerRadius: 6))
+        }.accessibilityElement(children: .ignore)
+            .accessibilityLabel("カウントの時間変化グラフ")
+            .accessibilityValue(rows.last.map { "最新値 \($0.value(rate: rate))、表示範囲 \(window)秒" } ?? "未測定")
     }
 }
 
@@ -254,7 +389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = CounterModel()
     private var window: NSWindow?
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 760),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 740),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "C8855-01 カウンター"
         window.contentView = NSHostingView(rootView: CounterView(model: model))
