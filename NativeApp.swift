@@ -4,7 +4,17 @@ import UniformTypeIdentifiers
 
 struct CounterView: View {
     @ObservedObject var model: CounterModel
+    @State private var showIntegration = false
     private var unit: String { model.rateDisplay ? "counts/s" : "counts" }
+    private var durationValid: Bool {
+        guard let value = Double(model.duration) else { return false }
+        return value.isFinite && (1...3600).contains(value)
+    }
+    private var recordingTitle: String {
+        if model.savedURL == nil { return "CSVと測定条件を自動保存" }
+        if model.running { return "測定データを記録中" }
+        return model.error.isEmpty ? "測定記録を保存しました" : "測定終了 · エラー内容を確認してください"
+    }
     private var manualValid: Bool {
         guard let value = Double(model.manualMaximum) else { return false }
         return value.isFinite && value > 0
@@ -22,31 +32,32 @@ struct CounterView: View {
                     .buttonStyle(.plain).help("接続と操作の説明").accessibilityLabel("使い方")
                 Button(action: model.start) { Label("測定開始", systemImage: "play.fill").frame(width: 96) }
                     .buttonStyle(.borderedProminent).controlSize(.large)
-                    .disabled(model.running || model.checking || !model.connected)
+                    .disabled(model.running || model.checking || !model.connected || (!model.continuous && !durationValid))
                 Button(action: model.stop) { Label("停止", systemImage: "stop.fill").frame(width: 64) }
                     .controlSize(.large).disabled(!model.running).keyboardShortcut(".", modifiers: .command)
             }.padding(.horizontal, 24).padding(.vertical, 16)
             Divider()
             HStack(spacing: 0) {
-                sidebar.frame(width: 242)
+                sidebar.frame(width: 256)
                 Divider()
                 VStack(alignment: .leading, spacing: 16) {
                     if !model.error.isEmpty {
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(model.status).font(.callout).bold()
-                                Text(model.error).font(.caption).textSelection(.enabled)
+                                Text(model.status).font(.callout).bold().lineLimit(2)
+                                Text(model.error).font(.caption).textSelection(.enabled).lineLimit(3).help(model.error)
                             }
                             Spacer()
                         }.padding(12).background(Color.orange.opacity(0.09)).cornerRadius(6)
                     }
                     HStack(alignment: .bottom) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(model.rateDisplay ? "毎秒のカウント" : "1回のカウント").font(.callout).foregroundColor(.secondary)
+                            Text(model.rateDisplay ? "毎秒のカウント" : "1区間のカウント").font(.callout).foregroundColor(.secondary)
                             HStack(alignment: .firstTextBaseline, spacing: 12) {
                                 Text(model.latest.map { String(format: model.rateDisplay ? "%.1f" : "%.0f", $0.value(rate: model.rateDisplay)) } ?? "—")
-                                    .font(.system(size: 54, weight: .medium, design: .monospaced)).monospacedDigit()
+                                    .font(.system(size: 44, weight: .medium, design: .monospaced)).monospacedDigit()
+                                    .lineLimit(1).minimumScaleFactor(0.6)
                                 Text(unit).font(.callout).foregroundColor(.secondary)
                             }
                         }
@@ -54,11 +65,12 @@ struct CounterView: View {
                         VStack(alignment: .trailing, spacing: 7) {
                             Text(model.running ? model.status : (model.samples.isEmpty ? "測定待ち" : model.status))
                                 .font(.callout).foregroundColor(model.running ? .green : .secondary)
-                            Text(model.latest.map { "\(String(format: "%g", $0.seconds))秒間に \($0.counts) カウント" } ?? "出力パルスを数えて表示します")
+                                .lineLimit(2)
+                            Text(model.latest.map { "\(String(format: "%g", $0.seconds))秒間に \(String($0.counts)) カウント" } ?? "出力パルスを数えて表示します")
                                 .font(.caption).foregroundColor(.secondary)
                             Text("\(model.sampleCount)回取得").font(.caption).monospacedDigit().foregroundColor(.secondary)
-                        }
-                    }
+                        }.frame(width: 186, alignment: .trailing)
+                    }.frame(height: 92, alignment: .bottom)
                     HStack {
                         Text("カウントの推移").font(.callout).bold()
                         Spacer()
@@ -84,14 +96,15 @@ struct CounterView: View {
             HStack(spacing: 12) {
                 Image(systemName: "doc.text").foregroundColor(.secondary)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(model.savedURL == nil ? "測定データはCSVに自動保存" : (model.running ? "CSVに記録中" : "CSVを保存しました"))
+                    Text(recordingTitle)
                         .font(.callout)
                     Text(model.savedURL?.lastPathComponent ?? "測定を開始すると記録を作成します")
                         .font(.caption).foregroundColor(.secondary).lineLimit(1)
                 }
                 Spacer()
                 Button("保存フォルダー", action: model.openDataFolder)
-                Button("CSVを書き出す…", action: model.export).disabled(model.running || model.samples.isEmpty)
+                Button("記録を書き出す…", action: model.export).disabled(model.running || model.samples.isEmpty)
+                    .help("CSVと測定条件のファイルを一緒に書き出します")
             }.padding(.horizontal, 24).padding(.vertical, 14)
         }.frame(minWidth: 980, minHeight: 650)
             .background(Color(nsColor: .windowBackgroundColor))
@@ -101,60 +114,96 @@ struct CounterView: View {
 
     private var sidebar: some View {
         ScrollView {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("カウンター").font(.callout).bold().padding(.bottom, 12)
-            Text(model.connectionDetail).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-                .padding(.bottom, 12)
-            Button("接続を確認", action: model.probe).disabled(model.running || model.checking)
-            Divider().padding(.vertical, 22)
-            Text("測定設定").font(.callout).bold().padding(.bottom, 16)
-            Text("1回の計数時間").font(.caption).foregroundColor(.secondary)
-            Picker("1回の計数時間", selection: $model.gate) {
-                ForEach(model.gates, id: \.self) { Text($0) }
-            }.labelsHidden().padding(.top, 6).disabled(model.checking)
-            if model.running && model.gate != model.activeGate {
-                Button("変更して再開", action: model.applyGate).padding(.top, 8)
-                Text("現在の記録を保存して再開します").font(.caption2).foregroundColor(.secondary).padding(.top, 4)
-            }
-            Text("測定の終了").font(.caption).foregroundColor(.secondary).padding(.top, 18)
-            Picker("測定の終了", selection: $model.continuous) {
-                Text("手動で停止").tag(true); Text("時間を指定").tag(false)
-            }.labelsHidden().padding(.top, 6).disabled(model.running)
-            if !model.continuous {
-                HStack {
-                    TextField("測定時間", text: $model.duration).textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("測定時間（秒）")
-                    Text("秒").font(.callout).foregroundColor(.secondary)
-                }.padding(.top, 8).disabled(model.running)
-            }
-            Divider().padding(.vertical, 22)
-            Text("グラフ設定").font(.callout).bold().padding(.bottom, 16)
-            Text("表示する時間").font(.caption).foregroundColor(.secondary)
-            Picker("表示する時間", selection: $model.windowSeconds) {
-                Text("直近10秒").tag(10.0); Text("直近30秒").tag(30.0); Text("直近60秒").tag(60.0)
-            }.labelsHidden().padding(.top, 6)
-            Text("表示する値").font(.caption).foregroundColor(.secondary).padding(.top, 16)
-            Picker("表示する値", selection: $model.rateDisplay) {
-                Text("毎秒のカウント").tag(true); Text("1回のカウント").tag(false)
-            }.labelsHidden().padding(.top, 6)
-            Toggle("縦軸の上限を自動調整", isOn: $model.automaticScale).toggleStyle(.checkbox).font(.caption).padding(.top, 16)
-            if !model.automaticScale {
-                HStack {
-                    TextField("上限", text: $model.manualMaximum).textFieldStyle(.roundedBorder).accessibilityLabel("縦軸の上限")
-                    Text(unit).font(.caption).foregroundColor(.secondary)
-                }.padding(.top, 8)
-                if !manualValid {
-                    Text("0より大きい数を入力してください。現在は自動調整です。")
-                        .font(.caption2).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("USB接続").font(.callout).bold()
+                        Spacer()
+                        Button("再確認", action: model.probe).disabled(model.running || model.checking)
+                            .controlSize(.small)
+                    }
+                    Text(model.connectionDetail).font(.caption).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-            }
-            Divider().padding(.vertical, 22)
-            Text("外部コード連携").font(.callout).bold().padding(.bottom, 8)
-            Text(model.apiReady ? "API受付中 · 127.0.0.1:8855" : (model.apiDetail == "準備中" ? "API準備中" : "APIを利用できません"))
-                .font(.caption).foregroundColor(model.apiReady ? .secondary : .orange)
-            if !model.apiReady { Text(model.apiDetail).font(.caption2).foregroundColor(.secondary) }
-            Spacer(minLength: 16)
-        }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+                Divider()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("測定条件").font(.callout).bold()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(model.running ? "次の計数時間" : "1区間の計数時間").font(.caption).foregroundColor(.secondary)
+                        Picker("1区間の計数時間", selection: $model.gate) {
+                            ForEach(model.gates, id: \.self) { Text($0) }
+                        }.labelsHidden().disabled(model.checking)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(model.activeGate.isEmpty ? "設定した時間ごとにカウントを取得" :
+                                 "\(model.running ? "実行中" : "前回")：\(model.activeGate)")
+                                .font(.caption).monospacedDigit().foregroundColor(.secondary)
+                            if model.running && model.gate != model.activeGate {
+                                Button("変更して再開", action: model.applyGate)
+                                    .help("現在の記録を保存して、選んだ計数時間で新しい測定を開始します")
+                            } else {
+                                Text(model.running ? "時間を選び直すと変更できます" : "短い区間ほど素早く更新します")
+                                    .font(.caption2).foregroundColor(.secondary)
+                            }
+                        }.frame(height: 48, alignment: .topLeading)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("終了方法").font(.caption).foregroundColor(.secondary)
+                        Picker("終了方法", selection: $model.continuous) {
+                            Text("手動で停止").tag(true); Text("時間を指定").tag(false)
+                        }.labelsHidden().disabled(model.running)
+                        HStack {
+                            Text("測定時間").font(.caption)
+                            Spacer()
+                            TextField("秒", text: $model.duration).textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced)).multilineTextAlignment(.trailing)
+                                .frame(width: 72).accessibilityLabel("測定時間（秒）")
+                                .disabled(model.running || model.continuous)
+                            Text("秒").font(.caption).foregroundColor(.secondary)
+                        }
+                        Text(!model.continuous && !durationValid ? "1〜3600秒を入力してください" :
+                             (model.continuous ? "「停止」を押すまで測定します" : "指定時間で自動停止します（1〜3600秒）"))
+                            .font(.caption2).foregroundColor(!model.continuous && !durationValid ? .orange : .secondary)
+                    }
+                }
+                Divider()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("グラフ表示").font(.callout).bold()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("横軸の表示範囲").font(.caption).foregroundColor(.secondary)
+                        Picker("横軸の表示範囲", selection: $model.windowSeconds) {
+                            Text("直近10秒").tag(10.0); Text("直近30秒").tag(30.0); Text("直近60秒").tag(60.0)
+                        }.labelsHidden()
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("表示する値").font(.caption).foregroundColor(.secondary)
+                        Picker("表示する値", selection: $model.rateDisplay) {
+                            Text("毎秒のカウント").tag(true); Text("1区間のカウント").tag(false)
+                        }.labelsHidden()
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("縦軸を自動調整", isOn: $model.automaticScale).toggleStyle(.checkbox).font(.caption)
+                        HStack {
+                            Text("上限").font(.caption)
+                            TextField("上限", text: $model.manualMaximum).textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced)).multilineTextAlignment(.trailing)
+                                .accessibilityLabel("縦軸の上限").disabled(model.automaticScale)
+                            Text(unit).font(.caption2).foregroundColor(.secondary).frame(width: 45, alignment: .leading)
+                        }
+                        if !model.automaticScale && !manualValid {
+                            Text("正の数を入力してください。現在は自動調整です。")
+                                .font(.caption2).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                Divider()
+                DisclosureGroup("外部コードとの連携", isExpanded: $showIntegration) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(model.apiReady ? "API受付中 · 127.0.0.1:8855" : (model.apiDetail == "準備中" ? "API準備中" : "APIを利用できません"))
+                            .font(.caption).foregroundColor(model.apiReady ? .secondary : .orange)
+                        if !model.apiReady { Text(model.apiDetail).font(.caption2).foregroundColor(.secondary) }
+                    }.padding(.top, 6).fixedSize(horizontal: false, vertical: true)
+                }.font(.caption)
+            }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
         }.background(Color(nsColor: .controlBackgroundColor))
     }
 
@@ -166,12 +215,12 @@ struct CounterView: View {
             Divider()
             Text("SPADの電源は別途±5 Vが必要です。カウンターのDC OUTをSPAD電源に接続しないでください。")
             Text("計数時間を変更したら「変更して再開」を押します。表示の固定は測定を止めません。「停止」で計数を終了します。")
-            Text("CSVは自動保存します。「保存フォルダー」で確認し、停止後に「CSVを書き出す…」でコピーできます。")
+            Text("CSVと測定条件を自動保存します。「保存フォルダー」で確認し、停止後に「記録を書き出す…」で両方をコピーできます。")
             Divider()
             Text("外部コード連携：このアプリを起動したまま、同じMac上のPythonコードなどからAPIで開始・停止・カウントの連続受信ができます。接続先は127.0.0.1:8855です。")
                 .font(.caption)
             Text("メーカー非公式 · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development")").font(.caption).foregroundColor(.secondary)
-            Text("USB認識・1秒ゲートの0カウント取得・停止は確認済み。非ゼロの精度、短いゲート、長時間測定、Intel実機は未検証です。")
+            Text("USB通信は確認済み。非ゼロの計数精度、長時間測定、表示・点灯との同期は実機での確認が必要です。")
                 .font(.caption).foregroundColor(.secondary)
             HStack { Spacer(); Button("閉じる") { model.showHelp = false }.keyboardShortcut(.defaultAction) }
         }.padding(28).frame(width: 510)
@@ -241,6 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.startAPI()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 740),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.contentMinSize = NSSize(width: 980, height: 650)
         window.title = "C8855-01 カウンター"
         window.contentView = NSHostingView(rootView: CounterView(model: model))
         window.center(); window.makeKeyAndOrderFront(nil)
