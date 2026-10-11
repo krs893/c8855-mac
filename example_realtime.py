@@ -24,10 +24,22 @@ def main():
             state = client.start(args.gate, args.seconds)
             started = True
             session = state["session_id"]
+            expected = 1
+            seen_session = False
             for event in events:
-                if event.get("session_id") != session:
+                if event["type"] == "heartbeat":
                     continue
+                if event.get("session_id") != session:
+                    if seen_session:
+                        raise CounterAPIError("Measurement session changed")
+                    continue
+                seen_session = True
                 if event["type"] == "sample":
+                    if event["sample"] != expected:
+                        raise CounterAPIError("Missing or duplicate sample; check CSV recording")
+                    if event["gate_seconds"] != args.gate:
+                        raise CounterAPIError("Gate changed; check CSV recording")
+                    expected += 1
                     on_sample(event)
                 elif event["type"] == "status" and not event["running"]:
                     if event["error"]:
@@ -42,7 +54,7 @@ def main():
         if started:
             try:
                 if client.status()["session_id"] == session:
-                    client.stop()
+                    client.stop(session_id=session)
             except CounterAPIError as error:
                 print(error, file=sys.stderr)
                 result = 1

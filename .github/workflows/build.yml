@@ -12,6 +12,8 @@ jobs:
           python-version: '3.13'
       - name: Test USB bridge and reference implementation
         run: python3 -m unittest discover -s . -p 'test_*.py'
+      - name: Test C++ measurement CLI
+        run: python3 -m unittest discover -s cpp/tests -p 'test_*.py'
       - name: Build C++ client
         run: |
           cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64'
@@ -20,6 +22,10 @@ jobs:
         run: |
           xcrun swiftc PlotData.swift PlotDataTests.swift -o /tmp/c8855-plot-tests
           /tmp/c8855-plot-tests
+      - name: Test paired CSV and metadata export
+        run: |
+          xcrun swiftc MeasurementExport.swift MeasurementExportTests.swift -o /tmp/c8855-export-tests
+          /tmp/c8855-export-tests
       - name: Build universal app
         run: python3 build_app.py
       - name: Verify and package

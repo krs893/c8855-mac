@@ -1,11 +1,22 @@
 #include "c8855_client.hpp"
 #include <csignal>
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <optional>
 #include <string>
 
-namespace { volatile std::sig_atomic_t interrupted = 0; void interrupt(int) { interrupted = 1; } }
+namespace {
+volatile std::sig_atomic_t interrupted = 0;
+void interrupt(int) { interrupted = 1; }
+double number(const char* value) {
+    const std::string text(value);
+    std::size_t used = 0;
+    const double result = std::stod(text, &used);
+    if (used != text.size() || !std::isfinite(result)) throw c8855::APIError("Invalid numeric argument");
+    return result;
+}
+}
 int main(int argc, char** argv) {
     double gate = 0.1;
     std::optional<double> duration = 10;
@@ -23,11 +34,11 @@ int main(int argc, char** argv) {
             else if (argument == "--help") {
                 std::cout << "c8855_realtime [--gate 0.1] [--seconds 10 | --continuous] [--json] [--port 8855] [--status | --stop]\n";
                 return 0;
-            } else if (i + 1 < argc && argument == "--gate") gate = std::stod(argv[++i]);
-            else if (i + 1 < argc && argument == "--seconds") duration = std::stod(argv[++i]);
+            } else if (i + 1 < argc && argument == "--gate") gate = number(argv[++i]);
+            else if (i + 1 < argc && argument == "--seconds") duration = number(argv[++i]);
             else if (i + 1 < argc && argument == "--port") {
-                const long value = std::stol(argv[++i]);
-                if (value < 1 || value > 65535) throw c8855::APIError("Invalid port");
+                const double value = number(argv[++i]);
+                if (value < 1 || value > 65535 || std::floor(value) != value) throw c8855::APIError("Invalid port");
                 port = static_cast<unsigned>(value);
             } else throw c8855::APIError("Unknown or incomplete argument: " + argument);
         }
@@ -42,7 +53,10 @@ int main(int argc, char** argv) {
             bool seen_session = false;
             bool stop_requested = false;
             while (true) {
-                if (interrupted && !stop_requested) { counter.stop(false); stop_requested = true; }
+                if (interrupted && !stop_requested) {
+                    if (counter.status().value("session_id", "") == session) counter.stop(false, session);
+                    stop_requested = true;
+                }
                 const auto event = stream.next();
                 if (event.at("type") == "heartbeat") continue;
                 if (event.value("session_id", "") != session) {
@@ -53,6 +67,7 @@ int main(int argc, char** argv) {
                 if (event.at("type") == "sample") {
                     const auto sample = c8855::Sample::from_event(event);
                     if (sample.sequence != expected++) throw c8855::APIError("Missing sample; check CSV recording");
+                    if (sample.gate_seconds != gate) throw c8855::APIError("Gate changed; check CSV recording");
                     // Feed sample.counts and sample.received_unix_seconds to gaze estimation here.
                     if (json_output) std::cout << event.dump() << '\n';
                     else std::cout << std::fixed << std::setprecision(3) << sample.received_unix_seconds
@@ -66,7 +81,7 @@ int main(int argc, char** argv) {
         } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
         if (!session.empty()) {
             try {
-                if (counter.status().value("session_id", "") == session) counter.stop();
+                if (counter.status().value("session_id", "") == session) counter.stop(true, session);
             } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -133,6 +133,7 @@ static int drain(C8855 *c) {
 }
 int c8855_start(C8855 *c, uint8_t gate, unsigned timeout) {
     if (gate < 0x09 || gate > 0x0f) return fail(c, "対応していない計数時間です。");
+    if (!timeout) return fail(c, "USB受信のタイムアウトは1 ms以上必要です。");
     uint8_t stop[] = {4}, reset[] = {7};
     c->block_count = gate == 0x09 ? 10 : gate == 0x0a ? 5 : gate == 0x0b ? 2 : 1;
     c->buffered_count = c->buffered_index = 0;
@@ -145,6 +146,7 @@ int c8855_start(C8855 *c, uint8_t gate, unsigned timeout) {
     return write_command(c, start, 8);
 }
 int c8855_read(C8855 *c, uint32_t *count) {
+    if (!c->started) return fail(c, "測定が開始されていません。");
     if (c->buffered_index == c->buffered_count) {
         uint8_t data[40]; int transferred = 0;
         int bytes = (int)(4 * c->block_count);
@@ -164,10 +166,15 @@ int c8855_read(C8855 *c, uint32_t *count) {
     *count = c->buffered[c->buffered_index++];
     return 0;
 }
+unsigned c8855_pending_count(C8855 *c) {
+    return c->started ? c->buffered_count - c->buffered_index : 0;
+}
 int c8855_stop(C8855 *c) {
     if (!c->started) return 0;
     uint8_t command[] = {4};
     if (write_command(c, command, 1) || drain(c)) return -1;
-    c->started = 0; return 0;
+    c->started = 0;
+    c->buffered_count = c->buffered_index = 0;
+    return 0;
 }
 const char *c8855_error(C8855 *c) { return c->error; }

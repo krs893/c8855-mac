@@ -106,14 +106,16 @@ Json Client::start(double gate, std::optional<double> duration) const {
     }
     return request("/start", &body);
 }
-Json Client::stop(bool wait) const {
-    const Json body = Json::object();
+Json Client::stop(bool wait, std::optional<std::string> session_id) const {
+    Json body = Json::object();
+    if (session_id) body["session_id"] = *session_id;
     auto state = request("/stop", &body);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms_);
     while (wait && state.at("running").get<bool>()) {
         if (std::chrono::steady_clock::now() >= deadline) throw APIError("Stop completion timed out");
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         state = status();
+        if (session_id && state.at("session_id").get<std::string>() != *session_id) throw APIError("Measurement session changed");
     }
     if (wait && !state.at("error").get<std::string>().empty()) throw APIError(state.at("error").get<std::string>());
     return state;

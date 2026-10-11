@@ -43,7 +43,7 @@ public:
     Json status() const;
     Json probe() const;
     Json start(double gate_seconds = 0.1, std::optional<double> duration_seconds = std::nullopt) const;
-    Json stop(bool wait = true) const;
+    Json stop(bool wait = true, std::optional<std::string> session_id = std::nullopt) const;
     Stream stream() const; // Open this BEFORE start(), so early samples are not missed.
 private:
     std::string base_;

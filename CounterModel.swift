@@ -32,6 +32,7 @@ final class CounterModel: ObservableObject {
     @Published var error = ""
     @Published var samples: [Sample] = []
     @Published var savedURL: URL?
+    @Published var savedMetadataURL: URL?
     private let queue = DispatchQueue(label: "lab.c8855.usb")
     private let lock = NSLock()
     private var stopRequested = false
@@ -53,6 +54,7 @@ final class CounterModel: ObservableObject {
         var result: [String: Any] = ["running": running, "checking": checking, "connected": connected,
             "status": status, "error": error, "sample_count": sampleCount, "session_id": sessionID,
             "selected_gate": gate, "active_gate": activeGate, "csv_file": savedURL?.path ?? "",
+            "metadata_file": savedMetadataURL?.path ?? "",
             "clock_unix_seconds": Date().timeIntervalSince1970]
         if let row = latest { result["latest"] = sampleEvent(row) }
         return result
@@ -81,7 +83,11 @@ final class CounterModel: ObservableObject {
             start(); return (202, apiStatus())
         }
         if method == "POST" && path == "/api/stop" {
-            guard payload.isEmpty else { return (400, ["error": "Stop takes an empty object"]) }
+            guard Set(payload.keys).isSubset(of: ["session_id"]) else { return (400, ["error": "Stop takes an optional session_id"]) }
+            if let value = payload["session_id"] {
+                guard let expected = value as? String, !expected.isEmpty else { return (400, ["error": "session_id must be a nonempty string"]) }
+                guard expected == sessionID else { return (409, ["error": "Measurement session changed"]) }
+            }
             stop(); return (202, apiStatus())
         }
         return (404, ["error": "Unknown endpoint"])
@@ -133,9 +139,10 @@ final class CounterModel: ObservableObject {
         }
         running = true; restartRequested = false; samples = []; sampleCount = 0
         freeze = false; frozenSamples = []; activeGate = gate
-        savedURL = nil; error = ""; status = "測定準備中…"
+        savedURL = nil; savedMetadataURL = nil; error = ""; status = "測定準備中…"
         sessionID = UUID().uuidString
         let recordSession = sessionID
+        let requestedAt = Date().timeIntervalSince1970
         emitStatus()
         lock.lock(); stopRequested = false; lock.unlock()
         let path = library
@@ -150,6 +157,9 @@ final class CounterModel: ObservableObject {
             }
             var failure = ""
             var file: FileHandle?
+            var metadataURL: URL?
+            var metadata: [String: Any] = [:]
+            var savedSamples = 0
             do {
                 try FileManager.default.createDirectory(at: dataFolder, withIntermediateDirectories: true)
                 let formatter = DateFormatter(); formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
@@ -158,6 +168,18 @@ final class CounterModel: ObservableObject {
                 file = try FileHandle(forWritingTo: url)
                 try file!.write(contentsOf: Data("received_at,sample,gate_seconds,counts,counts_per_second,received_unix_seconds,received_monotonic_seconds,session_id\n".utf8))
                 DispatchQueue.main.async { self.savedURL = url }
+                let sidecar = url.deletingPathExtension().appendingPathExtension("metadata.json")
+                metadata = ["schema_version": 1, "session_id": recordSession, "csv_file": url.lastPathComponent,
+                    "software": "C8855 Mac", "software_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
+                    "software_build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unbundled",
+                    "requested_unix_seconds": requestedAt, "gate_seconds": seconds,
+                    "continuous": continuous, "duration_seconds": continuous ? NSNull() : duration as Any,
+                    "usb_block_samples": seconds < 0.1 ? Int((0.1 / seconds).rounded()) : 1,
+                    "time_basis": "elapsed_gate_seconds = sample * gate_seconds; received timestamps are host reception, not gate start or photon arrival",
+                    "count_corrections_applied": false, "state": "prepared"]
+                try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys]).write(to: sidecar, options: .atomic)
+                metadataURL = sidecar
+                DispatchQueue.main.async { self.savedMetadataURL = sidecar }
                 if c8855_start(counter, code, UInt32(seconds * 2000 + 1000)) != 0 {
                     failure = String(cString: c8855_error(counter))
                 } else {
@@ -172,6 +194,7 @@ final class CounterModel: ObservableObject {
                         guard !pending.isEmpty else { return }
                         try file!.write(contentsOf: Data(csvBuffer.utf8))
                         try file!.synchronize()
+                        savedSamples = pending.last!.id
                         let rows = pending
                         pending.removeAll(keepingCapacity: true); csvBuffer = ""
                         DispatchQueue.main.async {
@@ -180,8 +203,10 @@ final class CounterModel: ObservableObject {
                             for row in rows { self.api.broadcast(self.sampleEvent(row)) }
                         }
                     }
-                    while continuous || i < limit {
-                        if self.shouldStop() { break }
+                    while true {
+                        // Complete any USB block already received before honoring stop/limit.
+                        // Reading the cached remainder performs no further USB transfer.
+                        if c8855_pending_count(counter) == 0 && (self.shouldStop() || (!continuous && i >= limit)) { break }
                         i += 1
                         var count: UInt32 = 0
                         if c8855_read(counter, &count) != 0 { failure = String(cString: c8855_error(counter)); break }
@@ -200,7 +225,16 @@ final class CounterModel: ObservableObject {
                 failure += (failure.isEmpty ? "" : " / ") + "停止確認に失敗：" + String(cString: c8855_error(counter))
             }
             c8855_close(counter)
-            try? file?.close()
+            do { try file?.close() }
+            catch { failure += (failure.isEmpty ? "" : " / ") + "CSVの終了処理に失敗：" + error.localizedDescription }
+            if let sidecar = metadataURL {
+                metadata["state"] = failure.isEmpty ? "finished" : "failed"
+                metadata["saved_samples"] = savedSamples
+                metadata["stop_requested"] = self.shouldStop()
+                metadata["error"] = failure
+                do { try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys]).write(to: sidecar, options: .atomic) }
+                catch { failure += (failure.isEmpty ? "" : " / ") + "測定情報の保存に失敗：" + error.localizedDescription }
+            }
             let finalFailure = failure
             DispatchQueue.main.async {
                 self.error = finalFailure
@@ -229,10 +263,9 @@ final class CounterModel: ObservableObject {
         panel.nameFieldStringValue = url.lastPathComponent
         if panel.runModal() == .OK, let destination = panel.url {
             do {
-                let data = try Data(contentsOf: url)
-                try data.write(to: destination, options: .atomic)
+                let hasMetadata = try MeasurementExport.write(csv: url, metadata: savedMetadataURL, to: destination)
+                self.status = hasMetadata ? "CSVと測定情報を書き出しました" : "CSVを書き出しました（測定情報は未記録）"
             } catch { self.error = error.localizedDescription }
         }
     }
 }
-

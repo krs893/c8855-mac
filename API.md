@@ -48,7 +48,7 @@ with counter.stream() as events:     # 先に受信経路を開く
                 break
     finally:
         if counter.status()["session_id"] == session:
-            counter.stop()
+            counter.stop(session_id=session)
 ```
 
 測定時間を指定しなければ停止するまで連続測定します。
@@ -59,15 +59,16 @@ with counter.stream() as events:     # 先に受信経路を開く
 
 | メソッド | パス | 内容 |
 | --- | --- | --- |
-| GET | `/api/status` | 接続、測定状態、最新値、保存先、セッションID |
+| GET | `/api/status` | 接続、測定状態、最新値、CSV/metadata保存先、セッションID |
 | GET | `/api/stream` | NDJSONでstatus / sample / heartbeatを連続受信 |
 | POST | `/api/probe` | `{}`でUSB接続確認。測定中は409 |
 | POST | `/api/start` | `{"gate_seconds":0.1,"duration_seconds":10}`で開始 |
-| POST | `/api/stop` | `{}`で停止を要求。完了はstatusで確認 |
+| POST | `/api/stop` | `{}`で停止を要求。`{"session_id":"開始応答のID"}`なら一致する測定だけ停止。完了はstatusで確認 |
 
 POSTは`Content-Type: application/json`必須。計数時間は0.01 / 0.02 / 0.05 / 0.1 / 0.2 / 0.5 / 1秒。
 測定時間は省略で連続、指定時は1〜3600秒。測定中の開始要求は409です。
 設定を変える場合は停止完了を待ってから開始します。
+外部コードの停止・後片付けはPython `stop(session_id=session)`、C++ `stop(true, session)`を使うと、途中で再開された別の測定を停止せず409で拒否します。
 
 ## sampleの値
 
@@ -85,12 +86,15 @@ POSTは`Content-Type: application/json`必須。計数時間は0.01 / 0.02 / 0.0
 
 ## リアルタイム計測の範囲
 
+`status.metadata_file`のJSONはCSVに対応し、計数設定・終了条件・アプリの版/ビルド・セッションID・保存点数を残します。刺激イベント、発光channel、注視ラベル、配置と光量、LUTの識別子は外部実験コードで同じセッションIDとともに別途記録してください。USB受信時刻だけでは順次発光した4灯のchannelを確定できません。
+
 - 最短10 msで計数します。100 ms未満の設定では100 ms分をまとめてUSB受信し、各点を送ります。USB・保存処理による追加遅延があります。
 - 受信時刻は光子到着時刻・ゲート開始時刻ではありません。画面の切り替え時刻を実験側でも記録し、応答の遅延を測ってください。厳密な表示同期は未実装です。
 - heartbeatは約2秒ごと。計測値ではありません。
 - 接続時はstatusを返し、その後の新規データを送ります。過去のsampleを再送しません。
 - 受信が遅いクライアントは切断します。取得番号の欠落やセッション変更を確認してください。アプリのCSV保存は独立して続きます。
 - ストリームを閉じるだけでは測定は停止しません。停止要求の完了まで確認してください。
+- 停止や指定時間の終了時も、受信済みのUSBブロックの残りをCSVとsampleイベントに保存します。短ゲートでは指定時間の端数を含む最終ブロックが残り、名目計数時間が最大100 ms未満長くなる場合があります。
 - このMac内だけに接続できます。ブラウザーからの要求と外部Hostを拒否します。他のローカルプログラムからは測定を操作できます。
 - 8855番ポートを使えない場合、APIは起動しません。画面の測定は使えます。
 

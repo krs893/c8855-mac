@@ -4,6 +4,7 @@ Never opens a physical USB device. The isolated test server writes to a temp fol
 """
 import csv
 import json
+import os
 import pathlib
 import signal
 import socket
@@ -28,7 +29,7 @@ class APITests(unittest.TestCase):
         (cls.folder / "mock.c").write_text(mock)
         subprocess.run(["xcrun", "clang", "-dynamiclib", str(cls.folder / "mock.c"), "-o", str(cls.folder / "mock.dylib")], check=True)
         subprocess.run(["xcrun", "clang", "-c", str(root / "USBBridge.c"), "-o", str(cls.folder / "bridge.o")], check=True)
-        sources = ["CounterModel.swift", "PlotData.swift", "LocalAPI.swift", "APIConfig.swift", "APIHarness.swift"]
+        sources = ["CounterModel.swift", "MeasurementExport.swift", "PlotData.swift", "LocalAPI.swift", "APIConfig.swift", "APIHarness.swift"]
         subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-module-cache-path", str(cls.folder / "cache"),
                         "-import-objc-header", str(root / "USBBridge.h"), *[str(root / name) for name in sources],
                         str(cls.folder / "bridge.o"), "-o", str(cls.folder / "server"),
@@ -88,12 +89,90 @@ class APITests(unittest.TestCase):
         self.assertEqual(int(rows[-1]["counts"]), received[-1]["counts"])
         self.assertEqual(rows[-1]["session_id"], session)
         self.assertEqual(float(rows[-1]["received_unix_seconds"]), received[-1]["received_unix_seconds"])
+        state = self.client.status()
+        metadata_path = pathlib.Path(state["metadata_file"])
+        metadata = json.loads(metadata_path.read_text())
+        self.assertEqual(metadata_path.parent, pathlib.Path(state["csv_file"]).parent)
+        self.assertEqual(metadata["session_id"], session)
+        self.assertEqual(metadata["csv_file"], pathlib.Path(state["csv_file"]).name)
+        self.assertEqual(metadata["gate_seconds"], 0.1)
+        self.assertEqual(metadata["duration_seconds"], 1)
+        self.assertEqual(metadata["software_version"], "development")
+        self.assertEqual(metadata["saved_samples"], len(rows))
+        self.assertEqual(metadata["state"], "finished")
+        self.assertFalse(metadata["count_corrections_applied"])
 
     def test_stop_and_reject_busy_start(self):
         self.client.start(0.1)
         with self.assertRaises(CounterAPIError):
             self.client.start(0.1)
         self.assertFalse(self.client.stop()["running"])
+
+    def test_stale_session_stop_cannot_stop_new_measurement(self):
+        old_session = self.client.start(0.1)["session_id"]
+        self.client.stop(session_id=old_session)
+        session = self.client.start(0.1)["session_id"]
+        with self.assertRaisesRegex(CounterAPIError, "session changed"):
+            self.client.stop(session_id=old_session)
+        self.assertEqual(self.client.status()["session_id"], session)
+        self.assertTrue(self.client.status()["running"])
+
+    def test_bad_stop_session_rejected_without_stopping(self):
+        self.client.start(0.1)
+        for payload in [{"session_id": ""}, {"session_id": True}, {"session_id": None}, {"extra": 1}]:
+            with self.assertRaises(CounterAPIError):
+                self.client._request("/stop", payload)
+        self.assertTrue(self.client.status()["running"])
+
+    def test_usb_failure_keeps_prior_blocks_and_failure_metadata(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        process = subprocess.Popen([str(self.folder / "server"), str(self.folder / "mock.dylib"),
+                                    str(self.folder / "error-records"), str(port)],
+                                   env=dict(os.environ, C8855_TEST_USB_MODE="8"))
+        client = CounterClient(port, timeout=5)
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    if client.status()["connected"]:
+                        break
+                except CounterAPIError:
+                    pass
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            with client.stream() as events:
+                session = client.start(0.01, 1)["session_id"]
+                received = []
+                for event in events:
+                    if event.get("session_id") != session:
+                        continue
+                    if event["type"] == "sample":
+                        received.append(event)
+                    elif event["type"] == "status" and not event["running"]:
+                        self.assertTrue(event["error"])
+                        break
+            state = client.status()
+            with open(state["csv_file"], newline="") as file:
+                rows = list(csv.DictReader(file))
+            self.assertEqual([int(row["counts"]) for row in rows], list(range(1, 21)))
+            self.assertEqual([row["counts"] for row in received], list(range(1, 21)))
+            metadata = json.loads(pathlib.Path(state["metadata_file"]).read_text())
+            self.assertEqual(metadata["state"], "failed")
+            self.assertEqual(metadata["saved_samples"], 20)
+            self.assertTrue(metadata["error"])
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_cpp_numeric_suffixes_rejected_without_start(self):
+        for option, value in [("--gate", "0.1junk"), ("--seconds", "1junk"), ("--port", "8855junk")]:
+            run = subprocess.run([str(self.cpp), "--port", str(self.port), option, value],
+                                 capture_output=True, text=True, timeout=3)
+            self.assertEqual(run.returncode, 1)
+            self.assertIn("Invalid numeric argument", run.stderr)
+        self.assertFalse(self.client.status()["running"])
 
     def test_subscriber_disconnect_does_not_stop_recording(self):
         self.client.start(0.1)
@@ -173,6 +252,44 @@ class APITests(unittest.TestCase):
             with self.assertRaises(CounterAPIError):
                 self.client._request("/start", payload)
         self.assertFalse(self.client.status()["running"])
+
+    def test_duration_ending_inside_usb_block_retains_received_samples(self):
+        with self.client.stream() as events:
+            session = self.client.start(0.01, 1.01)["session_id"]
+            received = []
+            for event in events:
+                if event.get("session_id") != session:
+                    continue
+                if event["type"] == "sample":
+                    received.append(event)
+                elif event["type"] == "status" and not event["running"]:
+                    self.assertEqual(event["error"], "")
+                    break
+        # 101 requested gates require eleven complete 10-sample USB transfers.
+        self.assertEqual([row["sample"] for row in received], list(range(1, 111)))
+        with open(self.client.status()["csv_file"], newline="") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual([int(row["sample"]) for row in rows], list(range(1, 111)))
+
+    def test_manual_stop_retains_inflight_usb_block(self):
+        self.client.start(0.01)
+        deadline = time.monotonic() + 3
+        while self.client.status()["status"] != "測定中":
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.005)
+        # The mock transfer takes 100 ms; stop while the first block is in flight.
+        time.sleep(0.01)
+        state = self.client.stop()
+        with open(state["csv_file"], newline="") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual(state["sample_count"], 10)
+        self.assertEqual([int(row["sample"]) for row in rows], list(range(1, 11)))
+        metadata = json.loads(pathlib.Path(state["metadata_file"]).read_text())
+        self.assertIsNone(metadata["duration_seconds"])
+        self.assertTrue(metadata["continuous"])
+        self.assertEqual(metadata["usb_block_samples"], 10)
+        self.assertEqual(metadata["saved_samples"], 10)
+        self.assertTrue(metadata["stop_requested"])
 
     def test_browser_origin_and_foreign_host_are_rejected(self):
         for headers in [{"Origin": "https://example.com"}, {"Host": "example.com"}]:

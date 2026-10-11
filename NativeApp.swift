@@ -170,7 +170,7 @@ struct CounterView: View {
             Divider()
             Text("外部コード連携：このアプリを起動したまま、同じMac上のPythonコードなどからAPIで開始・停止・カウントの連続受信ができます。接続先は127.0.0.1:8855です。")
                 .font(.caption)
-            Text("メーカー非公式 · v0.4.0").font(.caption).foregroundColor(.secondary)
+            Text("メーカー非公式 · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development")").font(.caption).foregroundColor(.secondary)
             Text("USB認識・1秒ゲートの0カウント取得・停止は確認済み。非ゼロの精度、短いゲート、長時間測定、Intel実機は未検証です。")
                 .font(.caption).foregroundColor(.secondary)
             HStack { Spacer(); Button("閉じる") { model.showHelp = false }.keyboardShortcut(.defaultAction) }

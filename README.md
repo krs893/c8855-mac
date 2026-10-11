@@ -45,6 +45,8 @@ CSVは `~/Library/Application Support/C8855Counter/measurements/` に自動保�
 「保存フォルダー」でFinderに表示し、測定終了後に「CSVを書き出す…」で別の場所へコピーできます。
 列は受信時刻、取得番号、計数時間、カウント、counts/s、Unix受信秒、単調時計の受信秒、セッションIDです。
 counts/sはカウント÷設定時間で、検出効率・デッドタイムの補正はありません。
+CSVと同じ名前の`.metadata.json`にセッションID、計数時間・終了条件、アプリの版・ビルド、保存点数、時刻の意味を記録します。「CSVを書き出す…」は両方を書き出します。手でCSVをコピーするときも、このファイルを一緒に残してください。
+停止・指定時間の終了時は、受信済みのUSBブロック全点を保存します。100 ms未満の設定では、最終ブロックのため指定時間を最大100 ms未満超える場合があります。
 連続測定では保存容量に注意してください。
 
 ## 外部コードからのリアルタイム計測
@@ -53,19 +55,24 @@ counts/sはカウント÷設定時間で、検出効率・デッドタイムの�
 [C++クライアントと実行例](cpp/README.md)は実行時にPythonを使いません。
 左側の「API受付中」を確認してください。[APIの使い方とPython例](API.md)。
 
+コマンド別のC++ CLI `c8855_counter` では、`status`／`settings`、`start`／`stop`、`record --gate 0.01 --duration 10 --csv counts.csv` を使えます。`record --samples 100` による取得点数での停止も対応します。生カウントと受信時刻を保存し、途中の失敗はCSVを残してエラーとして終了します。[ビルドとCLIの使い方](cpp/README.md#コマンド別のcliソース版)。アプリは先に起動してください。
+
 ```sh
 python3 example_realtime.py --gate 0.1 --seconds 10
 ```
 
 最短10 msごとのカウントを、100 ms分まとめて送信します。受信時刻はゲート開始時刻ではなく、画面表示との厳密な同期は未実装です。
+刺激の切り替え時刻・発光channel・注視ラベル・光源配置・光量・LUTの識別子は外部の実験コードでセッションIDとともに記録してください。これらを受信時刻から自動で割り当てる機能はありません。
 
 ## 検証状況
 
 2026-10-05、Apple Silicon MacとC8855-01で、USB認識・1秒ゲートの10回取得・停止・CSV保存を確認しました。SPAD未接続で全取得値は0でした。
-非ゼロのカウント精度、短いゲート、長時間測定、Intelでの動作は未確認です。研究に使う前にWindows版や既知のパルス入力と比較してください。
+後の10 msゲートの通信確認では830点・連続番号を記録しましたが、全点0のため非ゼロ信号の精度検証ではありません（[記録](PROTOCOL.md)）。非ゼロのカウント精度、長時間測定、Intel実機での動作は未確認です。研究に使う前にWindows版や既知のパルス入力と比較してください。
 通信エラーを0カウントや架空データに置き換えません。
 停止はUSB読み取り中に数秒かかる場合があります。終了時にも停止処理を行います。
 外部トリガー・複数台接続・メーカーAPIの完全互換は対象外です。
+
+2026-10-11、0.5.1の修正は実機操作なしで検証しました。模擬USB・API/Pythonの38テスト、C++ CLIの10テスト、測定情報の書き出し5ケース、グラフ計算が成功。短いゲートの終了で受信済みのブロック全点を保存し、途中のUSBエラーでも先行データと失敗状態を残します。生計数への補正はありません。実験側の残課題は[LABの準備記録](https://github.com/krs893/LAB/blob/master/research/SOFTWARE_READINESS.md)を参照してください。
 
 ## 開発
 
@@ -76,6 +83,8 @@ python3 build_app.py
 python3 -m unittest discover -s . -p 'test_*.py'
 xcrun swiftc PlotData.swift PlotDataTests.swift -o /tmp/c8855-plot-tests
 /tmp/c8855-plot-tests
+xcrun swiftc MeasurementExport.swift MeasurementExportTests.swift -o /tmp/c8855-export-tests
+/tmp/c8855-export-tests
 ```
 
 - `NativeApp.swift`：画面。
@@ -83,6 +92,7 @@ xcrun swiftc PlotData.swift PlotDataTests.swift -o /tmp/c8855-plot-tests
 - `LocalAPI.swift` / `APIConfig.swift`：ローカルAPIと設定の検証。
 - `counter_client.py` / `example_realtime.py`：Pythonからのリアルタイム受信。
 - `PlotData.swift`：表示範囲・縦軸の計算。
+- `MeasurementExport.swift`：CSVと測定情報の対での書き出し。
 - `USBBridge.c` / `.h`：USB通信。模擬libusbを使うテストは実機を操作しません。
 - `counter.py` / `reference_session.py`：通信確認用のPython参照実装。アプリ実行時は使いません。
 - [PROTOCOL.md](PROTOCOL.md)：通信の根拠と実機確認結果。

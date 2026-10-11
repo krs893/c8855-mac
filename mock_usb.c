@@ -8,7 +8,11 @@ static unsigned char opcodes[64];
 void mock_reset(int value) { mode=value; started=0; writes=0; reads=0; }
 int mock_writes(void) { return writes; }
 int mock_opcode(int i) { return opcodes[i]; }
-int libusb_init(void **c) { *c=(void *)1; return 0; }
+int libusb_init(void **c) {
+    const char *test_mode = getenv("C8855_TEST_USB_MODE");
+    if (test_mode) mock_reset(atoi(test_mode));
+    *c=(void *)1; return 0;
+}
 void libusb_exit(void *c) { (void)c; }
 ssize_t libusb_get_device_list(void *c, void ***list) {
     (void)c; *list=calloc(2,sizeof(void *)); (*list)[0]=(void *)2; return 1;
@@ -45,11 +49,12 @@ int libusb_bulk_transfer(void *h,unsigned char ep,unsigned char *p,int n,int *do
     if(n==64) { *done=0;return -7; }
     if(n!=block_bytes || !started) return -2;
     if(mode==4) { *done=0;return -7; }
+    if(mode==8 && reads>=20) { *done=0;return -7; }
     unsigned char bytes[4]={0x78,0x56,0x34,0x92};
     if(mode==2)memset(bytes,0xff,4);
     for (int i=0; i<n/4; ++i) {
         memcpy(p+i*4,bytes,4);
-        if(mode==5) { uint32_t value=++reads; memcpy(p+i*4,&value,4); }
+        if(mode==5 || mode==8) { uint32_t value=++reads; memcpy(p+i*4,&value,4); }
         if(mode==6 && i==n/4-1) memset(p+i*4,0xff,4);
     }
     *done=mode==1?2:n; return 0;

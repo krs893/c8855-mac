@@ -48,8 +48,8 @@ class CounterClient:
         # 202 means accepted; later status events report USB start failure/completion.
         return self._request("/start", payload)
 
-    def stop(self, wait=True):
-        state = self._request("/stop", {})
+    def stop(self, wait=True, session_id=None):
+        state = self._request("/stop", {} if session_id is None else {"session_id": session_id})
         if wait:
             deadline = time.monotonic() + self.timeout
             while state["running"]:
@@ -57,6 +57,8 @@ class CounterClient:
                     raise CounterAPIError("停止処理の完了を確認できませんでした")
                 time.sleep(0.05)
                 state = self.status()
+                if session_id is not None and state["session_id"] != session_id:
+                    raise CounterAPIError("Measurement session changed")
             if state["error"]:
                 raise CounterAPIError(state["error"])
         return state
@@ -83,9 +85,12 @@ class CounterClient:
                 if not line or len(line) > 65536 or not line.endswith(b"\n"):
                     raise CounterAPIError("リアルタイム受信が切断されました。再接続時に欠測を確認してください")
                 try:
-                    yield json.loads(line)
+                    event = json.loads(line)
                 except ValueError as error:
                     raise CounterAPIError("不正な受信データです") from error
+                if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                    raise CounterAPIError("不正な受信データです")
+                yield event
         try:
             yield events()
         finally:

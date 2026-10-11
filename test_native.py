@@ -91,3 +91,18 @@ class NativeBridgeTests(unittest.TestCase):
         h = self.open()
         self.assertEqual(self.bridge.c8855_start(h, 2, 3000), -1)
         self.assertEqual(self.mock.mock_writes(), 0)
+
+    def test_stopped_counter_does_not_expose_buffered_samples(self):
+        h = self.open(5)
+        self.assertEqual(self.bridge.c8855_start(h, 9, 1200), 0)
+        count = C.c_uint32()
+        self.assertEqual(self.bridge.c8855_read(h, C.byref(count)), 0)
+        self.assertEqual(count.value, 1)
+        self.assertEqual(self.bridge.c8855_stop(h), 0)
+        self.assertEqual(self.bridge.c8855_read(h, C.byref(count)), -1)
+        self.assertEqual(count.value, 1)
+
+    def test_zero_timeout_rejected_without_commands(self):
+        h = self.open()
+        self.assertEqual(self.bridge.c8855_start(h, 15, 0), -1)
+        self.assertEqual(self.mock.mock_writes(), 0)

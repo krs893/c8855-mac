@@ -33,6 +33,7 @@ with tempfile.TemporaryDirectory(prefix="c8855-build-") as directory:
                         "-swift-version", "5", "-O", "-module-cache-path", str(temp / "swift-cache"),
                         "-import-objc-header", str(root / "USBBridge.h"), str(root / "NativeApp.swift"),
                         str(root / "PlotData.swift"), str(root / "CounterModel.swift"),
+                        str(root / "MeasurementExport.swift"),
                         str(root / "LocalAPI.swift"), str(root / "APIConfig.swift"), str(obj), "-o", str(executable),
                         "-framework", "Cocoa", "-framework", "SwiftUI", "-framework", "Network"], check=True)
         executables.append(str(executable))
@@ -40,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix="c8855-build-") as directory:
 with (bundle / "Contents" / "Info.plist").open("wb") as f:
     plistlib.dump(dict(CFBundleExecutable="C8855Counter", CFBundleIdentifier="local.lab.c8855",
                       CFBundleName="C8855カウンター", CFBundleDisplayName="C8855カウンター",
-                      CFBundlePackageType="APPL", CFBundleVersion="5", CFBundleShortVersionString="0.5.0",
+                      CFBundlePackageType="APPL", CFBundleVersion="6", CFBundleShortVersionString="0.5.1",
                       LSMinimumSystemVersion="13.0", NSHighResolutionCapable=True), f)
 subprocess.run(["codesign", "--force", "--sign", "-", str(resources / "libusb-1.0.dylib")], check=True)
 subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)], check=True)
