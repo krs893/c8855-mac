@@ -247,11 +247,193 @@ class APITests(unittest.TestCase):
         self.assertEqual([int(row["counts"]) for row in rows], [row["counts"] for row in samples])
 
     def test_bad_settings_are_rejected_without_starting(self):
-        for payload in [{"gate_seconds": True}, {"gate_seconds": 0.001}, {"duration_seconds": 0},
-                        {"duration_seconds": True}, {"extra": 1}]:
+        initial = self.client.status()
+        for payload in [{"gate_seconds": True}, {"gate_seconds": False}, {"gate_seconds": 0.001},
+                        {"gate_seconds": None}, {"gate_seconds": "0.1"}, {"gate_seconds": -1},
+                        {"duration_seconds": 0}, {"duration_seconds": 3600.01}, {"duration_seconds": None},
+                        {"duration_seconds": "1"}, {"duration_seconds": True}, {"extra": 1}]:
             with self.assertRaises(CounterAPIError):
                 self.client._request("/start", payload)
+            state = self.client.status()
+            self.assertFalse(state["running"])
+            self.assertEqual(state["session_id"], initial["session_id"])
+            self.assertEqual(state["csv_file"], initial["csv_file"])
+            self.assertEqual(state["active_gate"], initial["active_gate"])
+
+    def test_selected_gate_does_not_relabel_active_measurement(self):
+        with self.client.stream() as events:
+            session = self.client.start(0.01, 1)["session_id"]
+            selected = self.client._request("/test/ui", {"gate": "0.2秒", "continuous": True, "duration": "3600"})
+            self.assertEqual(selected["selected_gate"], "0.2秒")
+            self.assertEqual(selected["active_gate"], "0.01秒")
+            received = []
+            for event in events:
+                if event.get("session_id") != session:
+                    continue
+                if event["type"] == "sample":
+                    received.append(event)
+                elif event["type"] == "status" and not event["running"]:
+                    self.assertEqual(event["error"], "")
+                    break
+        state = self.client.status()
+        with open(state["csv_file"], newline="") as file:
+            rows = list(csv.DictReader(file))
+        metadata = json.loads(pathlib.Path(state["metadata_file"]).read_text())
+        self.assertEqual(len(rows), 100)
+        self.assertTrue(all(float(row["gate_seconds"]) == 0.01 and row["session_id"] == session for row in rows))
+        self.assertTrue(all(row["gate_seconds"] == 0.01 and row["session_id"] == session for row in received))
+        self.assertEqual(metadata["gate_seconds"], 0.01)
+        self.assertFalse(metadata["continuous"])
+        self.assertEqual(metadata["duration_seconds"], 1)
+        self.assertEqual(state["selected_gate"], "0.2秒")
+        self.assertEqual(state["active_gate"], "0.01秒")
+
+    def test_apply_gate_snapshots_button_conditions_before_later_selection(self):
+        with self.client.stream() as events:
+            first = self.client.start(0.01)["session_id"]
+            for event in events:
+                if event.get("session_id") == first and event["type"] == "sample":
+                    first_event = event
+                    break
+            self.client._request("/test/ui", {"gate": "0.02秒", "action": "apply_gate", "after_gate": "0.05秒"})
+            previous_rows = []
+            final_first = None
+            for event in events:
+                if event.get("session_id") == first:
+                    if event["type"] == "sample":
+                        previous_rows.append(event)
+                    elif event["type"] == "status" and not event["running"]:
+                        final_first = event
+                elif event["type"] == "sample":
+                    second = event["session_id"]
+                    self.assertEqual(event["sample"], 1)
+                    self.assertEqual(event["gate_seconds"], 0.02)
+                    second_rows = [event]
+                    break
+            self.assertIsNotNone(final_first)
+            self.assertEqual(final_first["error"], "")
+            self.assertNotEqual(first, second)
+            self.assertTrue(all(row["gate_seconds"] == 0.01 for row in previous_rows))
+            self.client.stop(wait=False, session_id=second)
+            for event in events:
+                if event.get("session_id") != second:
+                    continue
+                if event["type"] == "sample":
+                    second_rows.append(event)
+                elif event["type"] == "status" and not event["running"]:
+                    state = event
+                    self.assertEqual(state["error"], "")
+                    break
+        with open(final_first["csv_file"], newline="") as file:
+            old_rows = list(csv.DictReader(file))
+        old_metadata = json.loads(pathlib.Path(final_first["metadata_file"]).read_text())
+        self.assertEqual([int(row["sample"]) for row in old_rows], [row["sample"] for row in [first_event] + previous_rows])
+        self.assertTrue(all(float(row["gate_seconds"]) == 0.01 and row["session_id"] == first for row in old_rows))
+        self.assertEqual(old_metadata["session_id"], first)
+        self.assertEqual(old_metadata["gate_seconds"], 0.01)
+        self.assertEqual(state["active_gate"], "0.02秒")
+        self.assertEqual(state["selected_gate"], "0.05秒")
+        with open(state["csv_file"], newline="") as file:
+            rows = list(csv.DictReader(file))
+        metadata = json.loads(pathlib.Path(state["metadata_file"]).read_text())
+        self.assertTrue(all(float(row["gate_seconds"]) == 0.02 and row["session_id"] == second for row in rows))
+        self.assertEqual(metadata["session_id"], second)
+        self.assertEqual(metadata["gate_seconds"], 0.02)
+        self.assertEqual([int(row["sample"]) for row in rows], [row["sample"] for row in second_rows])
+
+    def test_continuous_finite_switches_preserve_each_session_settings(self):
+        with self.client.stream() as events:
+            first = self.client.start(0.1)["session_id"]
+            for event in events:
+                if event.get("session_id") == first and event["type"] == "sample":
+                    break
+            before = self.client.status()
+            with self.assertRaisesRegex(CounterAPIError, "busy"):
+                self.client.start(0.2, 1)
+            unchanged = self.client.status()
+            self.assertEqual(unchanged["session_id"], first)
+            self.assertEqual(unchanged["selected_gate"], before["selected_gate"])
+            self.assertEqual(unchanged["active_gate"], before["active_gate"])
+            self.client.stop(session_id=first)
+            first_state = self.client.status()
+            first_csv = pathlib.Path(first_state["csv_file"])
+            first_bytes = first_csv.read_bytes()
+            first_metadata = json.loads(pathlib.Path(first_state["metadata_file"]).read_text())
+            self.assertTrue(first_metadata["continuous"])
+            self.assertIsNone(first_metadata["duration_seconds"])
+            second = self.client.start(0.2, 1)["session_id"]
+            received = []
+            for event in events:
+                if event.get("session_id") != second:
+                    continue
+                if event["type"] == "sample":
+                    received.append(event)
+                elif event["type"] == "status" and not event["running"]:
+                    second_state = event
+                    self.assertEqual(event["error"], "")
+                    break
+        self.assertNotEqual(first, second)
+        self.assertEqual([row["sample"] for row in received], list(range(1, 6)))
+        second_metadata = json.loads(pathlib.Path(second_state["metadata_file"]).read_text())
+        self.assertFalse(second_metadata["continuous"])
+        self.assertEqual(second_metadata["duration_seconds"], 1)
+        self.assertEqual(second_metadata["gate_seconds"], 0.2)
+        with open(second_state["csv_file"], newline="") as file:
+            second_csv = list(csv.DictReader(file))
+        self.assertTrue(all(float(row["gate_seconds"]) == 0.2 and row["session_id"] == second for row in second_csv))
+        self.assertTrue(all(row["gate_seconds"] == 0.2 for row in received))
+        self.assertEqual([int(row["sample"]) for row in second_csv], [row["sample"] for row in received])
+        third = self.client.start(0.05)["session_id"]
+        third_state = self.client.stop(session_id=third)
+        third_metadata = json.loads(pathlib.Path(third_state["metadata_file"]).read_text())
+        self.assertEqual(len({first, second, third}), 3)
+        self.assertTrue(third_metadata["continuous"])
+        self.assertIsNone(third_metadata["duration_seconds"])
+        self.assertEqual(third_metadata["gate_seconds"], 0.05)
+        self.assertEqual(first_csv.read_bytes(), first_bytes)
+
+    def test_stop_cancels_pending_gate_restart(self):
+        with self.client.stream() as events:
+            session = self.client.start(0.01)["session_id"]
+            for event in events:
+                if event.get("session_id") == session and event["type"] == "sample":
+                    break
+            self.client._request("/test/ui", {"gate": "0.02秒", "action": "apply_gate"})
+            state = self.client.stop(session_id=session)
+        time.sleep(0.15)
         self.assertFalse(self.client.status()["running"])
+        self.assertEqual(self.client.status()["session_id"], session)
+        self.assertEqual(state["active_gate"], "0.01秒")
+        self.assertEqual(state["selected_gate"], "0.02秒")
+        metadata = json.loads(pathlib.Path(state["metadata_file"]).read_text())
+        self.assertEqual(metadata["session_id"], session)
+        self.assertEqual(metadata["gate_seconds"], 0.01)
+
+    def test_ui_invalid_finite_duration_preserves_saved_session(self):
+        initial = self.client.status()
+        for value in ["", "nan", "inf", "-1", "0.99", "3600.01", "1秒"]:
+            state = self.client._request("/test/ui", {"continuous": False, "duration": value, "action": "start"})
+            self.assertFalse(state["running"])
+            self.assertTrue(state["error"])
+            self.assertEqual(state["session_id"], initial["session_id"])
+            self.assertEqual(state["csv_file"], initial["csv_file"])
+            self.assertEqual(state["metadata_file"], initial["metadata_file"])
+        # Hidden finite input is irrelevant when continuous mode is selected.
+        continuous = self.client._request("/test/ui", {"continuous": True, "duration": "nan", "action": "start"})
+        self.assertTrue(continuous["running"])
+        state = self.client.stop(session_id=continuous["session_id"])
+        metadata = json.loads(pathlib.Path(state["metadata_file"]).read_text())
+        self.assertTrue(metadata["continuous"])
+        self.assertIsNone(metadata["duration_seconds"])
+
+    def test_maximum_duration_is_accepted_and_recorded_without_waiting(self):
+        session = self.client.start(1, 3600)["session_id"]
+        state = self.client.stop(session_id=session)
+        metadata = json.loads(pathlib.Path(state["metadata_file"]).read_text())
+        self.assertFalse(metadata["continuous"])
+        self.assertEqual(metadata["duration_seconds"], 3600)
+        self.assertEqual(metadata["gate_seconds"], 1)
+        self.assertEqual(metadata["session_id"], session)
 
     def test_duration_ending_inside_usb_block_retains_received_samples(self):
         with self.client.stream() as events:

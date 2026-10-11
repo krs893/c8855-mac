@@ -36,7 +36,7 @@ final class CounterModel: ObservableObject {
     private let queue = DispatchQueue(label: "lab.c8855.usb")
     private let lock = NSLock()
     private var stopRequested = false
-    private var restartRequested = false
+    private var restartSettings: (gate: String, continuous: Bool, duration: String)?
     let gates: [String] = ["1秒", "0.5秒", "0.2秒", "0.1秒", "0.05秒", "0.02秒", "0.01秒"]
     private let settings: [String: (UInt8, Double)] = ["1秒": (15, 1), "0.5秒": (14, 0.5), "0.2秒": (13, 0.2), "0.1秒": (12, 0.1), "0.05秒": (11, 0.05), "0.02秒": (10, 0.02), "0.01秒": (9, 0.01)]
     private var library: String { suppliedLibrary ?? Bundle.main.resourceURL!.appendingPathComponent("libusb-1.0.dylib").path }
@@ -95,7 +95,7 @@ final class CounterModel: ObservableObject {
     func freezeChanged() { frozenSamples = freeze ? samples : [] }
     func applyGate() {
         guard running else { return }
-        restartRequested = true
+        restartSettings = (gate, continuous, duration)
         lock.lock(); stopRequested = true; lock.unlock()
         status = "記録を保存し、計数時間を変更しています…"
         emitStatus()
@@ -122,7 +122,7 @@ final class CounterModel: ObservableObject {
     }
 
     func stop() {
-        restartRequested = false
+        restartSettings = nil
         lock.lock(); stopRequested = true; lock.unlock()
         if running { status = "停止しています…" }
         emitStatus()
@@ -131,13 +131,16 @@ final class CounterModel: ObservableObject {
         lock.lock(); defer { lock.unlock() }; return stopRequested
     }
     func start() {
+        start(gate: gate, continuous: continuous, duration: duration)
+    }
+    private func start(gate: String, continuous requestedContinuous: Bool, duration requestedDuration: String) {
         guard !running && !checking, let (code, seconds) = settings[gate] else { return }
-        let continuous = continuous
-        let duration = continuous ? 10.0 : (Double(duration) ?? .nan)
+        let continuous = requestedContinuous
+        let duration = continuous ? 10.0 : (Double(requestedDuration) ?? .nan)
         guard duration.isFinite, duration >= 1, duration <= 3600 else {
             error = "測定時間は1〜3600秒で入力してください。"; return
         }
-        running = true; restartRequested = false; samples = []; sampleCount = 0
+        running = true; restartSettings = nil; samples = []; sampleCount = 0
         freeze = false; frozenSamples = []; activeGate = gate
         savedURL = nil; savedMetadataURL = nil; error = ""; status = "測定準備中…"
         sessionID = UUID().uuidString
@@ -152,7 +155,7 @@ final class CounterModel: ObservableObject {
             var buffer = [CChar](repeating: 0, count: 512)
             guard let counter = c8855_open(path, &buffer, buffer.count) else {
                 let message = String(cString: buffer)
-                DispatchQueue.main.async { self.connected = false; self.connectionDetail = "USB接続を確認してください。"; self.error = message; self.status = "測定を開始できません。"; self.running = false; self.restartRequested = false; self.emitStatus() }
+                DispatchQueue.main.async { self.connected = false; self.connectionDetail = "USB接続を確認してください。"; self.error = message; self.status = "測定を開始できません。"; self.running = false; self.restartSettings = nil; self.emitStatus() }
                 return
             }
             var failure = ""
@@ -241,8 +244,9 @@ final class CounterModel: ObservableObject {
                 self.status = finalFailure.isEmpty ? "測定終了" : "測定を中止しました"
                 self.running = false
                 self.emitStatus()
-                if finalFailure.isEmpty && self.restartRequested { self.start() }
-                else { self.restartRequested = false }
+                if finalFailure.isEmpty, let requested = self.restartSettings {
+                    self.start(gate: requested.gate, continuous: requested.continuous, duration: requested.duration)
+                } else { self.restartSettings = nil }
             }
         }
     }

@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix="c8855-build-") as directory:
 with (bundle / "Contents" / "Info.plist").open("wb") as f:
     plistlib.dump(dict(CFBundleExecutable="C8855Counter", CFBundleIdentifier="local.lab.c8855",
                       CFBundleName="C8855カウンター", CFBundleDisplayName="C8855カウンター",
-                      CFBundlePackageType="APPL", CFBundleVersion="6", CFBundleShortVersionString="0.5.1",
+                      CFBundlePackageType="APPL", CFBundleVersion="7", CFBundleShortVersionString="0.5.2",
                       LSMinimumSystemVersion="13.0", NSHighResolutionCapable=True), f)
 subprocess.run(["codesign", "--force", "--sign", "-", str(resources / "libusb-1.0.dylib")], check=True)
 subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)], check=True)
